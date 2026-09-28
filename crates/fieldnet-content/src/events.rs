@@ -255,6 +255,8 @@ pub enum ContentEvent {
         recovered_chunks: usize,
         recovered_sessions: usize,
     },
+    /// Content object was successfully replicated and verified.
+    Replicated { id: ContentId, peer_node: NodeId },
 }
 
 impl ContentEvent {
@@ -309,6 +311,7 @@ impl ContentEvent {
             Self::QuotaExceeded { .. } => "content.quota.exceeded",
             Self::StorageRecovered { .. } => "content.storage.recovered",
             Self::RecoveryCompleted { .. } => "content.recovery.completed",
+            Self::Replicated { .. } => "content.replicated",
         }
     }
 }

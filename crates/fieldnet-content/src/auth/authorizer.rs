@@ -200,7 +200,7 @@ impl ContentAuthorizer {
             INSERT INTO content_acls (content_id, node_id, actions_mask, created_at)
             VALUES (?1, ?2, ?3, ?4)
             ON CONFLICT(content_id, node_id) DO UPDATE SET
-                actions_mask = excluded.actions_mask
+                actions_mask = (content_acls.actions_mask | excluded.actions_mask)
             "#,
             params![content_id.to_hex(), node_id.to_hex(), mask, now],
         )?;

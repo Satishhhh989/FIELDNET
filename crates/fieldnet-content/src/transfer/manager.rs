@@ -656,18 +656,26 @@ impl TransferManager {
             .await?;
 
         // Update session to Complete
-        {
+        let provider_node = {
             let mut sessions = self.sessions.write().await;
             if let Some(session) = sessions.get_mut(&transfer_id) {
                 session.transition_to(TransferState::Complete)?;
                 self.persistence.save(session)?;
+                session.provider_node_id
+            } else {
+                NodeId::from_bytes([0u8; 32])
             }
-        }
+        };
 
         let _ = self.event_tx.send(ContentEvent::TransferCompleted {
             transfer_id,
             content_id,
             total_bytes: reconstructed_bytes.len() as u64,
+        });
+
+        let _ = self.event_tx.send(ContentEvent::Replicated {
+            id: content_id,
+            peer_node: provider_node,
         });
 
         info!(
@@ -731,6 +739,36 @@ impl TransferManager {
         self.persistence.save(session)?;
 
         let remaining = session.missing_chunks();
+
+        // Check if current provider is expired or no longer usable; failover if needed
+        let now = Timestamp::now();
+        let is_usable = self
+            .provider_registry
+            .get(&session.content_id, &session.provider_node_id)
+            .map(|p| p.is_usable(now))
+            .unwrap_or(false);
+
+        if !is_usable {
+            let candidates = self
+                .provider_registry
+                .find_providers_for_chunks(&session.content_id, &remaining);
+            let fallback = if candidates.is_empty() {
+                self.provider_registry.find_providers(&session.content_id)
+            } else {
+                candidates
+            };
+            if let Some(best) = fallback.first() {
+                info!(
+                    transfer_id = %transfer_id,
+                    old_provider = %session.provider_node_id,
+                    new_provider = %best.provider_node_id,
+                    "Provider failover: selected new provider for resumed transfer"
+                );
+                session.provider_node_id = best.provider_node_id;
+                self.persistence.save(session)?;
+            }
+        }
+
         let _ = self.event_tx.send(ContentEvent::TransferResumed {
             transfer_id: *transfer_id,
             remaining_chunks: remaining.len() as u32,

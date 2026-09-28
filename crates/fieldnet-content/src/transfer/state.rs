@@ -120,6 +120,7 @@ impl TransferState {
                 target,
                 Self::Verifying
                     | Self::Paused
+                    | Self::Resuming
                     | Self::Failed
                     | Self::Cancelled
                     | Self::Expired

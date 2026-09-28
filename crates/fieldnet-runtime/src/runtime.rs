@@ -457,19 +457,33 @@ impl FieldnetRuntime {
         content_id: &fieldnet_content::ContentId,
         destination: Option<NodeId>,
     ) -> Result<fieldnet_content::ContentAdvertise, fieldnet_content::ContentError> {
-        if !self.content_store.has(content_id)? {
+        let has_full = self.content_store.has(content_id)?;
+        let manifest = self.content_store.get_manifest(content_id).ok();
+
+        if !has_full && manifest.is_none() {
             return Err(fieldnet_content::ContentError::ContentNotFound(*content_id));
         }
 
         let metadata = self.content_store.stat(content_id).ok();
-        let manifest = self.content_store.get_manifest(content_id).ok();
+        let (has_full_content, available_chunks, total_chunks, content_size) = if has_full {
+            let size = metadata.as_ref().map(|m| m.size_bytes);
+            (true, None, None, size)
+        } else {
+            let m = manifest.as_ref().unwrap();
+            let bitmap = self.content_store.chunk_availability(&m.manifest_id).ok();
+            (false, bitmap, Some(m.chunk_count), Some(m.total_size))
+        };
 
-        let mut ad = fieldnet_content::ContentAdvertise::new_full(
+        let mut ad = fieldnet_content::ContentAdvertise::new(
+            None,
             *content_id,
             manifest.as_ref().map(|m| m.manifest_id),
             self.node_id(),
             self.identity.public_key_bytes(),
-            metadata.as_ref().map(|m| m.size_bytes),
+            has_full_content,
+            available_chunks,
+            total_chunks,
+            content_size,
             300,
             1,
         );
@@ -582,15 +596,34 @@ impl FieldnetRuntime {
                 fieldnet_content::ContentError::TransferNotFound(*transfer_id),
             )?;
             let target_provider = session.provider_node_id;
-            let content_msg = fieldnet_content::ContentMessage::Request(req);
+            let content_msg = fieldnet_content::ContentMessage::Request(req.clone());
             if let Err(e) = self
-                .send_content_message(target_provider, content_msg)
+                .send_content_message(target_provider, content_msg.clone())
                 .await
             {
                 warn!(
                     "Failed to dispatch resumed content request to {}: {}",
                     target_provider, e
                 );
+            }
+
+            // In multi-source swarm: fan out to other providers that hold missing chunks
+            let remaining = session.missing_chunks();
+            let other_providers = self
+                .content_store
+                .provider_registry()
+                .find_providers_for_chunks(&session.content_id, &remaining);
+            for prov in other_providers {
+                if prov.provider_node_id != target_provider
+                    && prov.is_usable(fieldnet_core::Timestamp::now())
+                {
+                    let _ = self
+                        .send_content_message(
+                            prov.provider_node_id,
+                            fieldnet_content::ContentMessage::Request(req.clone()),
+                        )
+                        .await;
+                }
             }
         }
         Ok(())
@@ -726,6 +759,34 @@ impl FieldnetRuntime {
             actions,
             ttl_secs,
         )
+    }
+
+    /// Replicates a content object from the network to local storage, verifying all chunks and manifest.
+    pub async fn content_replicate(
+        &self,
+        content_id: &fieldnet_content::ContentId,
+        provider: Option<NodeId>,
+    ) -> Result<fieldnet_content::TransferId, fieldnet_content::ContentError> {
+        if self.content_has(content_id)? {
+            let _ =
+                self.content_store
+                    .event_tx()
+                    .send(fieldnet_content::ContentEvent::Replicated {
+                        id: *content_id,
+                        peer_node: provider.unwrap_or_else(|| self.node_id()),
+                    });
+            return Ok(fieldnet_content::TransferId::random());
+        }
+
+        self.content_request(*content_id, provider).await
+    }
+
+    /// Opens an async reader stream for the specified content.
+    pub async fn content_stream(
+        &self,
+        content_id: &fieldnet_content::ContentId,
+    ) -> Result<tokio::fs::File, fieldnet_content::ContentError> {
+        self.content_open_stream(content_id).await
     }
 
     pub fn sync_engine(&self) -> Arc<SyncEngine> {
@@ -1645,7 +1706,12 @@ impl FieldnetRuntime {
                             return;
                         }
 
-                        let is_authorized = self.is_peer_allowed(&req.requester_node_id);
+                        let is_blocked = self
+                            .config
+                            .blocked_peers
+                            .as_ref()
+                            .map_or(false, |b| b.contains(&req.requester_node_id));
+                        let is_authorized = !is_blocked;
                         let provider_svc = self.transfer_manager.provider_service();
 
                         match provider_svc.handle_request(&req, is_authorized).await {
@@ -1752,11 +1818,33 @@ impl FieldnetRuntime {
 
                                     // If more chunks need to be scheduled within backpressure window
                                     if let Some(next_req) = maybe_next_req {
-                                        let req_msg =
-                                            fieldnet_content::ContentMessage::Request(next_req);
+                                        let req_msg = fieldnet_content::ContentMessage::Request(
+                                            next_req.clone(),
+                                        );
                                         let _ = self_clone
-                                            .send_content_message(message.source, req_msg)
+                                            .send_content_message(message.source, req_msg.clone())
                                             .await;
+
+                                        // In multi-source swarm: fan out to other providers that hold any of next_req's requested chunks
+                                        let other_providers = self_clone
+                                            .content_store
+                                            .provider_registry()
+                                            .find_providers_for_chunks(
+                                                &next_req.content_id,
+                                                &next_req.requested_chunks,
+                                            );
+                                        for prov in other_providers {
+                                            if prov.provider_node_id != message.source
+                                                && prov.is_usable(fieldnet_core::Timestamp::now())
+                                            {
+                                                let _ = self_clone
+                                                    .send_content_message(
+                                                        prov.provider_node_id,
+                                                        req_msg.clone(),
+                                                    )
+                                                    .await;
+                                            }
+                                        }
                                     }
 
                                     // If complete, send TransferComplete notification

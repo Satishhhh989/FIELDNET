@@ -131,47 +131,46 @@ impl TransferProviderService {
         }
 
         // 3. Validate local content availability and integrity state
-        let has_content = self.content_store.has(&req.content_id)?;
-        if !has_content {
-            debug!(
-                content_id = %req.content_id,
-                "Requested content object not found in local store"
-            );
-            return Ok(ProviderResponse::Response(Box::new(ContentResponse {
-                transfer_id: req.transfer_id,
-                content_id: req.content_id,
-                manifest: None,
-                status: TransferResponseStatus::NotFound,
-                accepted_chunks: Vec::new(),
-                rejected_chunks: req.requested_chunks.clone(),
-                total_chunks: 0,
-                total_bytes: 0,
-                nominal_chunk_size: 0,
-                error_message: Some("ContentId not found in provider store".to_string()),
-            })));
-        }
-
-        // 4. Retrieve manifest
+        let has_content = self.content_store.has(&req.content_id).unwrap_or(false);
         let manifest = match self.manifest_store.get_by_content_id(&req.content_id) {
             Ok(m) => m,
             Err(e) => {
-                warn!(
-                    content_id = %req.content_id,
-                    error = %e,
-                    "Failed to retrieve manifest for possessed content"
-                );
-                return Ok(ProviderResponse::Response(Box::new(ContentResponse {
-                    transfer_id: req.transfer_id,
-                    content_id: req.content_id,
-                    manifest: None,
-                    status: TransferResponseStatus::NotFound,
-                    accepted_chunks: Vec::new(),
-                    rejected_chunks: req.requested_chunks.clone(),
-                    total_chunks: 0,
-                    total_bytes: 0,
-                    nominal_chunk_size: 0,
-                    error_message: Some("Manifest unavailable for content".to_string()),
-                })));
+                if !has_content {
+                    debug!(
+                        content_id = %req.content_id,
+                        "Requested content object not found in local store or manifest store"
+                    );
+                    return Ok(ProviderResponse::Response(Box::new(ContentResponse {
+                        transfer_id: req.transfer_id,
+                        content_id: req.content_id,
+                        manifest: None,
+                        status: TransferResponseStatus::NotFound,
+                        accepted_chunks: Vec::new(),
+                        rejected_chunks: req.requested_chunks.clone(),
+                        total_chunks: 0,
+                        total_bytes: 0,
+                        nominal_chunk_size: 0,
+                        error_message: Some("ContentId not found in provider store".to_string()),
+                    })));
+                } else {
+                    warn!(
+                        content_id = %req.content_id,
+                        error = %e,
+                        "Failed to retrieve manifest for possessed content"
+                    );
+                    return Ok(ProviderResponse::Response(Box::new(ContentResponse {
+                        transfer_id: req.transfer_id,
+                        content_id: req.content_id,
+                        manifest: None,
+                        status: TransferResponseStatus::NotFound,
+                        accepted_chunks: Vec::new(),
+                        rejected_chunks: req.requested_chunks.clone(),
+                        total_chunks: 0,
+                        total_bytes: 0,
+                        nominal_chunk_size: 0,
+                        error_message: Some("Manifest unavailable for content".to_string()),
+                    })));
+                }
             }
         };
 
