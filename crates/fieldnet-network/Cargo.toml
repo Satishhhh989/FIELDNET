@@ -1,0 +1,22 @@
+[package]
+name = "fieldnet-network"
+version = "0.1.0"
+edition = "2021"
+description = "FIELDNET networking, TCP transport, discovery, and secure sessions"
+
+[dependencies]
+fieldnet-core = { workspace = true }
+fieldnet-identity = { workspace = true }
+fieldnet-protocol = { workspace = true }
+tokio = { workspace = true }
+x25519-dalek = { workspace = true }
+chacha20poly1305 = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+socket2 = { workspace = true }
+blake3 = { workspace = true }

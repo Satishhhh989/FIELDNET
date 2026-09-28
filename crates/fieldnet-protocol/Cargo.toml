@@ -1,0 +1,14 @@
+[package]
+name = "fieldnet-protocol"
+version = "0.1.0"
+edition = "2021"
+description = "FIELDNET protocol envelopes, message models, and serialization"
+
+[dependencies]
+fieldnet-core = { workspace = true }
+fieldnet-identity = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fieldnet-core",
+    "crates/fieldnet-identity",
+    "crates/fieldnet-protocol",
+    "crates/fieldnet-network",
+    "crates/fieldnet-data",
+    "crates/fieldnet-content",
+    "crates/fieldnet-runtime",
+]
+
+[workspace.dependencies]
+fieldnet-core = { path = "crates/fieldnet-core" }
+fieldnet-identity = { path = "crates/fieldnet-identity" }
+fieldnet-protocol = { path = "crates/fieldnet-protocol" }
+fieldnet-network = { path = "crates/fieldnet-network" }
+fieldnet-data = { path = "crates/fieldnet-data" }
+fieldnet-content = { path = "crates/fieldnet-content" }
+fieldnet-runtime = { path = "crates/fieldnet-runtime" }
+
+tokio = { version = "1.40", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sha2 = "0.10"
+blake3 = { version = "1.5", features = ["serde"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core", "serde"] }
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+rand = "0.8"
+hex = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+async-trait = "0.1"
+socket2 = { version = "0.5", features = ["all"] }
+rusqlite = { version = "0.32", features = ["bundled"] }

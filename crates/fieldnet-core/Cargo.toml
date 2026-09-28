@@ -1,0 +1,11 @@
+[package]
+name = "fieldnet-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core types, identifiers, and error definitions for FIELDNET"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }

@@ -1,0 +1,27 @@
+[package]
+name = "fieldnet-runtime"
+version = "0.1.0"
+edition = "2021"
+description = "FIELDNET runtime core and CLI node executor"
+
+[[bin]]
+name = "fieldnet-node"
+path = "src/main.rs"
+
+[dependencies]
+fieldnet-core = { workspace = true }
+fieldnet-identity = { workspace = true }
+fieldnet-protocol = { workspace = true }
+fieldnet-network = { workspace = true }
+fieldnet-data = { workspace = true }
+fieldnet-content = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+rusqlite = { workspace = true }
+async-trait = { workspace = true }
+

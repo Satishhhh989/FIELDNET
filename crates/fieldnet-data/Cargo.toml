@@ -1,0 +1,23 @@
+[package]
+name = "fieldnet-data"
+version = "0.1.0"
+edition = "2021"
+description = "FIELDNET local-first data subsystem, SQLite storage, migrations, and document store"
+
+[dependencies]
+fieldnet-core = { workspace = true }
+fieldnet-identity = { workspace = true }
+fieldnet-protocol = { workspace = true }
+async-trait = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+blake3 = { workspace = true }
+tokio = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.8"

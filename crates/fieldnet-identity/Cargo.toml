@@ -1,0 +1,15 @@
+[package]
+name = "fieldnet-identity"
+version = "0.1.0"
+edition = "2021"
+description = "Sovereign Ed25519 identity management and persistence for FIELDNET"
+
+[dependencies]
+fieldnet-core = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
