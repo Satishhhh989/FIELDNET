@@ -165,6 +165,7 @@ pub struct Operation {
 
 impl Operation {
     /// Computes the deterministic signing payload and hash for an operation.
+    #[allow(clippy::too_many_arguments)]
     pub fn compute_signing_payload(
         document_id: &DocumentId,
         actor_node_id: &NodeId,
@@ -195,6 +196,7 @@ impl Operation {
     }
 
     /// Computes the deterministic OperationId from canonical operation fields.
+    #[allow(clippy::too_many_arguments)]
     pub fn compute_id(
         document_id: &DocumentId,
         actor_node_id: &NodeId,

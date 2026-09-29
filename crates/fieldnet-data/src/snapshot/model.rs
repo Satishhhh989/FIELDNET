@@ -79,6 +79,7 @@ pub struct DocumentSnapshot {
 
 impl DocumentSnapshot {
     /// Computes deterministic 32-byte BLAKE3 hash over snapshot payload and causal coverage metadata.
+    #[allow(clippy::too_many_arguments)]
     pub fn compute_state_hash(
         document_id: &DocumentId,
         snapshot_version: u64,

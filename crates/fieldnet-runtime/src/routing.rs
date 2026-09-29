@@ -224,6 +224,19 @@ impl RoutingTable {
     }
 }
 
+#[async_trait::async_trait]
+impl fieldnet_service::RouteProvider for RoutingTable {
+    async fn get_route(&self, destination: &NodeId) -> Option<fieldnet_service::RouteTarget> {
+        let route = self.get_route(destination).await?;
+        Some(fieldnet_service::RouteTarget {
+            destination: route.destination,
+            next_hop: route.next_hop,
+            hops: route.hops,
+            metric: route.metric,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

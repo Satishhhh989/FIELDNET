@@ -515,6 +515,7 @@ impl SyncEngine {
         Ok(None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_delta_request(
         &self,
         peer_id: NodeId,
@@ -579,6 +580,7 @@ impl SyncEngine {
         Ok(Some(resp))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_delta_response(
         &self,
         peer_id: NodeId,
@@ -945,6 +947,7 @@ impl SyncEngine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_sync_ack(
         &self,
         peer_id: NodeId,

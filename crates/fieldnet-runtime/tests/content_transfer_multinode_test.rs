@@ -258,7 +258,7 @@ async fn test_two_real_nodes_interrupted_transfer_and_resume() {
             }
         }
     }
-    assert!(verified_count_before >= 2 && verified_count_before < 6);
+    assert!((2..6).contains(&verified_count_before));
     println!(
         "Transfer paused with {} verified chunks",
         verified_count_before

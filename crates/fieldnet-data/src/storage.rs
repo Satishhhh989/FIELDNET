@@ -904,7 +904,7 @@ impl DocumentStore {
                             version, created_at, updated_at, is_deleted, payload_bytes
                      FROM documents WHERE document_id = ?1",
                     params![op.document_id.as_bytes().as_slice()],
-                    |r| Self::row_to_document(r),
+                    Self::row_to_document,
                 )
                 .ok();
 
@@ -1185,10 +1185,8 @@ impl DocumentStore {
                     break;
                 }
             }
-            if ready {
-                if let Ok(_) = self.apply_remote_operation_sync(&op) {
-                    applied.push(op.op_id);
-                }
+            if ready && self.apply_remote_operation_sync(&op).is_ok() {
+                applied.push(op.op_id);
             }
         }
         Ok(applied)
@@ -1493,7 +1491,7 @@ impl DocumentStore {
     ) -> Result<DocumentSnapshot, DataError> {
         let doc = self
             .get_sync(document_id)?
-            .ok_or_else(|| DataError::DocumentNotFound(*document_id))?;
+            .ok_or(DataError::DocumentNotFound(*document_id))?;
 
         let replica_state =
             self.get_causal_state_sync(document_id)?
@@ -1908,8 +1906,7 @@ impl DocumentStore {
 
         // 2. Query peer causal stability
         let now = Timestamp::now().as_millis();
-        let grace_period_ms =
-            (crate::schema::DEFAULT_PEER_GRACE_PERIOD_DAYS * 24 * 3600 * 1000) as u64;
+        let grace_period_ms = crate::schema::DEFAULT_PEER_GRACE_PERIOD_DAYS * 24 * 3600 * 1000;
 
         let peers = self.list_peer_sync_watermarks_for_document_sync(document_id)?;
         let mut min_peer_synced_seq: Option<u64> = None;
@@ -2005,7 +2002,7 @@ impl DocumentStore {
 
         let doc_before = self
             .get_sync(document_id)?
-            .ok_or_else(|| DataError::DocumentNotFound(*document_id))?;
+            .ok_or(DataError::DocumentNotFound(*document_id))?;
 
         let (bytes_reclaimed, ops_removed) = self.db.with_transaction(|tx| {
             // Compute bytes reclaimed
@@ -2064,7 +2061,7 @@ impl DocumentStore {
         // Invariant verification: Compaction must NEVER change logical document state!
         let doc_after = self
             .get_sync(document_id)?
-            .ok_or_else(|| DataError::DocumentNotFound(*document_id))?;
+            .ok_or(DataError::DocumentNotFound(*document_id))?;
 
         if doc_before.state != doc_after.state || doc_before.version != doc_after.version {
             warn!(

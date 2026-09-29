@@ -507,7 +507,7 @@ async fn test_08_provider_service_authorization_and_manifest_serving() {
     for (i, offset, chunk_bytes) in chunks {
         let (cid, _) = store.chunk_store().put(&chunk_bytes).await.unwrap();
         manifest_chunks.push(ChunkDescriptor {
-            index: i as u32,
+            index: i,
             offset,
             size: chunk_bytes.len() as u32,
             chunk_id: cid,

@@ -36,10 +36,12 @@ pub enum ConnectionEvent {
     },
 }
 
+pub type PeerConnectionMap = Arc<RwLock<HashMap<NodeId, (SessionId, mpsc::Sender<Message>)>>>;
+
 pub struct ConnectionManager {
     local_identity: Arc<NodeIdentity>,
     tcp_port: u16,
-    connections: Arc<RwLock<HashMap<NodeId, (SessionId, mpsc::Sender<Message>)>>>,
+    connections: PeerConnectionMap,
     connecting_peers: Arc<RwLock<HashSet<NodeId>>>,
     event_tx: broadcast::Sender<ConnectionEvent>,
     inbound_msg_tx: mpsc::Sender<(NodeId, Message)>,
@@ -237,7 +239,7 @@ impl ConnectionManager {
     async fn handle_inbound_connection(
         mut stream: TcpStream,
         local_identity: Arc<NodeIdentity>,
-        connections: Arc<RwLock<HashMap<NodeId, (SessionId, mpsc::Sender<Message>)>>>,
+        connections: PeerConnectionMap,
         event_tx: broadcast::Sender<ConnectionEvent>,
         inbound_tx: mpsc::Sender<(NodeId, Message)>,
     ) -> Result<(), NetworkError> {
@@ -255,7 +257,7 @@ impl ConnectionManager {
     async fn spawn_session_tasks(
         stream: TcpStream,
         session: SecureSession,
-        connections: Arc<RwLock<HashMap<NodeId, (SessionId, mpsc::Sender<Message>)>>>,
+        connections: PeerConnectionMap,
         event_tx: broadcast::Sender<ConnectionEvent>,
         inbound_tx: mpsc::Sender<(NodeId, Message)>,
     ) {

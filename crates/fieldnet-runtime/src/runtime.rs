@@ -8,6 +8,20 @@ use fieldnet_network::{
 use fieldnet_protocol::{
     AckPayload, AckStatus, Deduplicator, Message, MessageType, RouteAdvertisement,
 };
+use fieldnet_service::{
+    AuthContext, GatewayConfig, GatewayError, LocalWebGateway, MdnsConfig, MdnsError, MdnsService,
+    MdnsState, RegistryConfig, ResolverConfig, RouteProvider, ServiceAdvertisementHandler,
+    ServiceAdvertiser, ServiceDispatcher, ServiceError, ServiceEvent, ServiceId, ServiceInstanceId,
+    ServiceManifest, ServiceManifestBuilder, ServiceMessage, ServiceQuery, ServiceQueryWire,
+    ServiceRegistry, ServiceRequestHandler, ServiceResolution, ServiceResolver,
+    ServiceRpcRequestWire, ServiceRpcResponseWire, ServiceWithdrawal,
+};
+use fieldnet_wasm::{
+    ActiveExecutionInfo, ApplicationError, ApplicationEvent, ApplicationExecutionSupervisor,
+    ApplicationId, ApplicationInstaller, ApplicationNetworkMessage, ApplicationNetworkSender,
+    ApplicationPackage, ApplicationRecord, ApplicationRegistry, ApplicationState, ExecutionId,
+    ExecutionReport, ModuleCache, WasmEngine,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -94,6 +108,11 @@ pub struct FieldnetRuntime {
     content_store: Arc<fieldnet_content::ContentStore>,
     transfer_manager: Arc<fieldnet_content::TransferManager>,
     sync_engine: Arc<SyncEngine>,
+    service_registry: Arc<ServiceRegistry>,
+    service_resolver: Arc<ServiceResolver>,
+    service_advertiser: Arc<ServiceAdvertiser>,
+    service_handler: Arc<ServiceAdvertisementHandler>,
+    service_event_tx: broadcast::Sender<ServiceEvent>,
     deduplicator: Arc<Deduplicator>,
     message_delivery: Arc<RwLock<HashMap<MessageId, MessageDeliveryStatus>>>,
     received_messages: Arc<RwLock<Vec<ReceivedMessage>>>,
@@ -102,6 +121,16 @@ pub struct FieldnetRuntime {
     dtn_flush_notify: Arc<Notify>,
     delivery_notify: broadcast::Sender<(MessageId, MessageDeliveryStatus)>,
     shutdown_tx: broadcast::Sender<()>,
+    local_service_handlers: Arc<RwLock<HashMap<ServiceId, Arc<dyn ServiceRequestHandler>>>>,
+    pending_service_rpcs:
+        Arc<RwLock<HashMap<MessageId, tokio::sync::oneshot::Sender<ServiceRpcResponseWire>>>>,
+    local_web_gateway: Arc<RwLock<Option<Arc<LocalWebGateway>>>>,
+    mdns_service: Arc<RwLock<Option<Arc<MdnsService>>>>,
+    application_registry: Arc<ApplicationRegistry>,
+    application_installer: Arc<ApplicationInstaller>,
+    application_supervisor: Arc<ApplicationExecutionSupervisor>,
+    application_event_tx: broadcast::Sender<ApplicationEvent>,
+    weak_self: Arc<RwLock<Option<std::sync::Weak<FieldnetRuntime>>>>,
 }
 
 impl FieldnetRuntime {
@@ -210,6 +239,64 @@ impl FieldnetRuntime {
             sync_transport,
         ));
 
+        // 3d. Open persistent Service Registry and initialize Resolver, Advertiser, and Handler (Phase 08)
+        let service_db_path = config.data_dir.join("services.db");
+        let (service_event_tx, _) = broadcast::channel(256);
+        let service_registry = ServiceRegistry::open(
+            RegistryConfig::default(),
+            Some(service_db_path),
+            service_event_tx.clone(),
+        )?;
+
+        let service_resolver = Arc::new(ServiceResolver::new(
+            Arc::clone(&service_registry),
+            Some(Arc::clone(&routing_table) as Arc<dyn RouteProvider>),
+            Some(node_id),
+            Some(service_event_tx.clone()),
+            ResolverConfig::default(),
+        ));
+
+        let service_advertiser = Arc::new(ServiceAdvertiser::new(
+            Arc::clone(&service_registry),
+            Arc::clone(&identity),
+            service_event_tx.clone(),
+            120, // default ttl secs
+        ));
+        service_advertiser.restore_from_registry().await;
+
+        let service_handler = Arc::new(ServiceAdvertisementHandler::new(
+            node_id,
+            Arc::clone(&service_registry),
+            service_event_tx.clone(),
+        ));
+
+        // 3e. Open persistent Application Registry, Installer, and Execution Supervisor (Phase 09)
+        let app_db_path = config.data_dir.join("applications.db");
+        let (application_event_tx, _) = broadcast::channel(256);
+        let application_registry = Arc::new(ApplicationRegistry::new(&app_db_path)?);
+        let application_installer = Arc::new(ApplicationInstaller::new(
+            Arc::clone(&application_registry),
+            Some(Arc::clone(&content_store)),
+            application_event_tx.clone(),
+        ));
+        let wasm_engine = Arc::new(WasmEngine::new()?);
+        let module_cache = Arc::new(ModuleCache::new());
+        let application_supervisor = Arc::new(ApplicationExecutionSupervisor::new(
+            Arc::clone(&wasm_engine),
+            Arc::clone(&module_cache),
+            Arc::clone(&application_registry),
+            Arc::clone(&content_store),
+            application_event_tx.clone(),
+        ));
+
+        // Reconcile dangling application executions interrupted by node restart
+        if let Err(e) = application_supervisor.reconcile_on_startup() {
+            warn!(
+                "Failed to reconcile application lifecycle states on startup: {}",
+                e
+            );
+        }
+
         let runtime = Arc::new(Self {
             config,
             identity,
@@ -222,6 +309,11 @@ impl FieldnetRuntime {
             content_store,
             transfer_manager,
             sync_engine,
+            service_registry,
+            service_resolver,
+            service_advertiser,
+            service_handler,
+            service_event_tx,
             deduplicator: Arc::new(Deduplicator::new(1000)),
             message_delivery: Arc::new(RwLock::new(HashMap::new())),
             received_messages: Arc::new(RwLock::new(Vec::new())),
@@ -230,7 +322,77 @@ impl FieldnetRuntime {
             dtn_flush_notify,
             delivery_notify,
             shutdown_tx,
+            local_service_handlers: Arc::new(RwLock::new(HashMap::new())),
+            pending_service_rpcs: Arc::new(RwLock::new(HashMap::new())),
+            local_web_gateway: Arc::new(RwLock::new(None)),
+            mdns_service: Arc::new(RwLock::new(None)),
+            application_registry,
+            application_installer,
+            application_supervisor,
+            application_event_tx,
+            weak_self: Arc::new(RwLock::new(None)),
         });
+
+        {
+            let mut ws = runtime.weak_self.write().await;
+            *ws = Some(Arc::downgrade(&runtime));
+        }
+
+        // 3f. Connect application execution supervisor to runtime subsystems (Phase 09 Build 03)
+        runtime
+            .application_supervisor
+            .set_service_resolver(Arc::clone(&runtime.service_resolver))
+            .await;
+        runtime
+            .application_supervisor
+            .set_node_id(runtime.identity.node_id())
+            .await;
+        runtime
+            .application_supervisor
+            .set_network_sender(Arc::new(RuntimeApplicationNetworkSender {
+                runtime: Arc::downgrade(&runtime),
+            }))
+            .await;
+
+        // 5b. Start Local Web Gateway if configured via gateway.json
+        let gateway_config_path = runtime.config.data_dir.join("gateway.json");
+        if gateway_config_path.exists() {
+            match GatewayConfig::load_from_file(&gateway_config_path) {
+                Ok(gw_config) => {
+                    let dispatcher = Arc::new(RuntimeServiceDispatcher {
+                        runtime: Arc::downgrade(&runtime),
+                    });
+                    let gateway = Arc::new(
+                        LocalWebGateway::new(
+                            gw_config,
+                            node_id,
+                            Arc::clone(&runtime.service_registry),
+                            Arc::clone(&runtime.service_resolver),
+                            dispatcher,
+                            Some(Arc::clone(&runtime.content_store)),
+                        )
+                        .with_event_tx(runtime.service_event_tx.clone()),
+                    );
+
+                    match gateway.start().await {
+                        Ok(addr) => {
+                            info!("Local Web Gateway started on http://{}", addr);
+                            let mut gw_guard = runtime.local_web_gateway.write().await;
+                            *gw_guard = Some(gateway);
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to start Local Web Gateway (runtime continuing): {}",
+                                e
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to load gateway.json: {}", e);
+                }
+            }
+        }
 
         // 6. Start internal runtime coordination loops
         runtime.spawn_discovery_loop();
@@ -239,9 +401,25 @@ impl FieldnetRuntime {
         runtime.spawn_dtn_worker_loop();
         runtime.spawn_sync_dispatch_loop(sync_rx);
         runtime.spawn_provider_maintenance_loop();
+        runtime.spawn_service_maintenance_loop();
         runtime.spawn_message_processing_loop().await;
 
         info!("FIELDNET Runtime successfully started and operational");
+        Ok(runtime)
+    }
+
+    /// Starts the runtime and initiates the Local Web Gateway with explicit configuration.
+    pub async fn start_with_gateway(
+        config: RuntimeConfig,
+        gateway_config: GatewayConfig,
+    ) -> Result<Arc<Self>, Box<dyn std::error::Error + Send + Sync>> {
+        let runtime = Self::start(config).await?;
+        if let Err(e) = runtime.start_gateway(Some(gateway_config)).await {
+            warn!(
+                "Failed to start Local Web Gateway in start_with_gateway (runtime continuing): {}",
+                e
+            );
+        }
         Ok(runtime)
     }
 
@@ -536,6 +714,282 @@ impl FieldnetRuntime {
         }
 
         Ok(query)
+    }
+
+    // =========================================================================
+    // Phase 08: Service Discovery & Advertisement APIs
+    // =========================================================================
+
+    pub fn service_registry(&self) -> &Arc<ServiceRegistry> {
+        &self.service_registry
+    }
+
+    pub fn service_resolver(&self) -> &Arc<ServiceResolver> {
+        &self.service_resolver
+    }
+
+    pub fn service_advertiser(&self) -> &Arc<ServiceAdvertiser> {
+        &self.service_advertiser
+    }
+
+    pub fn service_handler(&self) -> &Arc<ServiceAdvertisementHandler> {
+        &self.service_handler
+    }
+
+    pub fn subscribe_service_events(&self) -> broadcast::Receiver<ServiceEvent> {
+        self.service_event_tx.subscribe()
+    }
+
+    // =========================================================================
+    // Phase 09: Application Model & Package System APIs
+    // =========================================================================
+
+    pub fn application_registry(&self) -> &Arc<ApplicationRegistry> {
+        &self.application_registry
+    }
+
+    pub fn application_installer(&self) -> &Arc<ApplicationInstaller> {
+        &self.application_installer
+    }
+
+    pub fn application_supervisor(&self) -> &Arc<ApplicationExecutionSupervisor> {
+        &self.application_supervisor
+    }
+
+    pub fn subscribe_application_events(&self) -> broadcast::Receiver<ApplicationEvent> {
+        self.application_event_tx.subscribe()
+    }
+
+    pub async fn install_application(
+        &self,
+        package: &ApplicationPackage,
+        item_payloads: &HashMap<String, Vec<u8>>,
+    ) -> Result<ApplicationRecord, ApplicationError> {
+        self.application_installer
+            .install(package, item_payloads)
+            .await
+    }
+
+    pub async fn rollback_application(
+        &self,
+        app_id: &ApplicationId,
+    ) -> Result<ApplicationRecord, ApplicationError> {
+        self.application_installer.rollback(app_id).await
+    }
+
+    pub async fn run_application(
+        &self,
+        app_id: &ApplicationId,
+    ) -> Result<ExecutionReport, ApplicationError> {
+        self.application_supervisor.execute(app_id).await
+    }
+
+    pub async fn stop_application_execution(
+        &self,
+        execution_id: &ExecutionId,
+    ) -> Result<(), ApplicationError> {
+        self.application_supervisor
+            .stop_execution(execution_id)
+            .await
+    }
+
+    pub fn authorize_application(
+        &self,
+        app_id: &ApplicationId,
+    ) -> Result<ApplicationState, ApplicationError> {
+        self.application_registry
+            .update_lifecycle_state(app_id, ApplicationState::Authorized)
+    }
+
+    pub async fn run_application_with_id(
+        &self,
+        app_id: &ApplicationId,
+        execution_id: ExecutionId,
+    ) -> Result<ExecutionReport, ApplicationError> {
+        self.application_supervisor
+            .execute_with_id(app_id, execution_id)
+            .await
+    }
+
+    pub async fn list_application_executions(&self) -> Vec<ActiveExecutionInfo> {
+        self.application_supervisor.list_active_executions().await
+    }
+
+    /// Registers a local service with the advertiser and broadcasts its signed manifest
+    /// to connected peers or sends it directly to `destination`.
+    pub async fn advertise_service(
+        &self,
+        builder: ServiceManifestBuilder,
+        destination: Option<NodeId>,
+    ) -> Result<ServiceManifest, ServiceError> {
+        let manifest = self
+            .service_advertiser
+            .register_and_advertise(builder)
+            .await?;
+
+        let service_msg = ServiceMessage::Advertise(manifest.clone());
+        if let Some(dest) = destination {
+            let _ = self.send_service_message(dest, service_msg).await;
+        } else {
+            let _ = self.broadcast_service_message(service_msg).await;
+        }
+
+        Ok(manifest)
+    }
+
+    /// Updates an existing local service advertisement and broadcasts the updated manifest.
+    pub async fn update_service<F>(
+        &self,
+        instance_id: &ServiceInstanceId,
+        mutate: F,
+        destination: Option<NodeId>,
+    ) -> Result<ServiceManifest, ServiceError>
+    where
+        F: FnOnce(&mut ServiceManifest),
+    {
+        let manifest = self
+            .service_advertiser
+            .update_service(instance_id, mutate)
+            .await?;
+
+        let service_msg = ServiceMessage::Advertise(manifest.clone());
+        if let Some(dest) = destination {
+            let _ = self.send_service_message(dest, service_msg).await;
+        } else {
+            let _ = self.broadcast_service_message(service_msg).await;
+        }
+
+        Ok(manifest)
+    }
+
+    /// Explicitly withdraws an active local service advertisement and broadcasts the signed withdrawal.
+    pub async fn withdraw_service(
+        &self,
+        instance_id: &ServiceInstanceId,
+        destination: Option<NodeId>,
+    ) -> Result<ServiceWithdrawal, ServiceError> {
+        let withdrawal = self.service_advertiser.withdraw(instance_id).await?;
+
+        let service_msg = ServiceMessage::Withdraw(withdrawal.clone());
+        if let Some(dest) = destination {
+            let _ = self.send_service_message(dest, service_msg).await;
+        } else {
+            let _ = self.broadcast_service_message(service_msg).await;
+        }
+
+        Ok(withdrawal)
+    }
+
+    /// Resolves a service query against the local registry, integrated with current routing state.
+    pub async fn resolve_service(
+        &self,
+        query: &ServiceQuery,
+        auth_context: Option<&AuthContext>,
+    ) -> Result<ServiceResolution, ServiceError> {
+        self.service_resolver.resolve(query, auth_context).await
+    }
+
+    /// Transmits a service query to a target node.
+    pub async fn query_services_network(
+        &self,
+        query_wire: ServiceQueryWire,
+        destination: NodeId,
+    ) -> Result<MessageId, Box<dyn std::error::Error + Send + Sync>> {
+        let service_msg = ServiceMessage::Query(query_wire);
+        self.send_service_message(destination, service_msg).await
+    }
+
+    /// Sends a signed SERVICE message (framed as `MessageType::Service = 8`)
+    /// to a logical destination NodeId.
+    pub async fn send_service_message(
+        &self,
+        destination: NodeId,
+        service_msg: ServiceMessage,
+    ) -> Result<MessageId, Box<dyn std::error::Error + Send + Sync>> {
+        let payload = service_msg
+            .to_bytes()
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        let sequence = {
+            let mut seq = self.sequence_counter.write().await;
+            let current = *seq;
+            *seq += 1;
+            current
+        };
+
+        let message = Message::sign_and_build(
+            &self.identity,
+            destination,
+            MessageType::Service,
+            payload,
+            16,      // multi-hop TTL
+            120_000, // 2-minute expiration
+            sequence,
+            Priority::Normal,
+        )?;
+
+        let message_id = message.message_id;
+
+        match &service_msg {
+            ServiceMessage::Advertise(ref manifest) => {
+                let _ = self.service_event_tx.send(ServiceEvent::AdvertisementSent {
+                    service_id: manifest.service_id.clone(),
+                    instance_id: manifest.instance_id.clone(),
+                    destination: Some(destination),
+                });
+            }
+            ServiceMessage::Query(ref q) => {
+                let _ = self.service_event_tx.send(ServiceEvent::QuerySent {
+                    service_id: q.service_id.clone(),
+                    query_id: q.query_id,
+                    destination,
+                });
+            }
+            _ => {}
+        }
+
+        if let Some(next_hop) = self.routing_table.get_next_hop(&destination).await {
+            if self.connection_manager.is_connected(&next_hop).await {
+                info!(
+                    "Dispatching SERVICE message {} towards destination {} via next hop {}",
+                    message_id, destination, next_hop
+                );
+                if let Err(e) = self
+                    .connection_manager
+                    .send_message(&next_hop, message.clone())
+                    .await
+                {
+                    debug!(
+                        "Direct service transmission to next hop {} failed: {}; staging in DTN queue",
+                        next_hop, e
+                    );
+                    self.dtn_queue.enqueue(&message)?;
+                }
+                return Ok(message_id);
+            }
+        }
+
+        self.dtn_queue.enqueue(&message)?;
+        Ok(message_id)
+    }
+
+    /// Broadcasts a signed SERVICE message to all currently connected peers and known reachable route destinations.
+    pub async fn broadcast_service_message(
+        &self,
+        service_msg: ServiceMessage,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut target_nodes = std::collections::HashSet::new();
+        for peer in self.connection_manager.connected_peers().await {
+            target_nodes.insert(peer);
+        }
+        for route in self.routing_table.get_all_routes().await {
+            target_nodes.insert(route.destination);
+        }
+        target_nodes.remove(&self.node_id());
+
+        for target in target_nodes {
+            let _ = self.send_service_message(target, service_msg.clone()).await;
+        }
+        Ok(())
     }
 
     /// Accessor for the Content Transfer Engine manager.
@@ -1218,6 +1672,7 @@ impl FieldnetRuntime {
                                 // Add as direct 1-hop route
                                 runtime.routing_table.add_direct_neighbor(peer_id).await;
                                 runtime.content_store.provider_registry().handle_peer_discovered(&peer_id);
+                                runtime.service_registry.mark_provider_available(&peer_id).await;
 
                                 // Immediately send our route advertisement to the newly connected neighbor
                                 let advert = runtime.routing_table.generate_advertisement().await;
@@ -1250,12 +1705,24 @@ impl FieldnetRuntime {
                                 tokio::spawn(async move {
                                     let _ = se.initiate_sync(peer_id).await;
                                 });
+
+                                // Push active local service advertisements to newly connected neighbor
+                                let active_manifests = runtime.service_advertiser.get_active_advertisements().await;
+                                for manifest in active_manifests {
+                                    let msg = ServiceMessage::Advertise(manifest);
+                                    let _ = runtime.send_service_message(peer_id, msg).await;
+                                }
                             }
                             Ok(ConnectionEvent::PeerDisconnected { peer_id }) => {
                                 info!("PeerDisconnected event for {}", peer_id);
                                 // Invalidate routes that used this peer as next_hop
                                 runtime.routing_table.remove_routes_via(&peer_id).await;
                                 runtime.content_store.provider_registry().handle_peer_expired(&peer_id);
+                                // Mark services provided by disconnected peer as unavailable
+                                runtime
+                                    .service_registry
+                                    .mark_provider_unavailable(&peer_id, "peer disconnected")
+                                    .await;
                             }
                             Ok(ConnectionEvent::StateChanged { .. }) => {}
                             Err(e) => {
@@ -1346,6 +1813,42 @@ impl FieldnetRuntime {
         });
     }
 
+    fn spawn_service_maintenance_loop(self: &Arc<Self>) {
+        let runtime = Arc::clone(self);
+        let mut shutdown_rx = runtime.shutdown_tx.subscribe();
+
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        let now = Timestamp::now();
+                        // 1. Sweep expired remote service records
+                        let expired = runtime.service_registry.sweep_expired(now).await;
+                        if expired > 0 {
+                            debug!("Service maintenance loop swept {} expired records", expired);
+                        }
+
+                        // 2. Refresh local service manifests approaching expiration
+                        if let Ok(refreshed) = runtime.service_advertiser.refresh_due_manifests(now).await {
+                            for manifest in refreshed {
+                                info!(
+                                    "Refreshed local service manifest '{}' (seq: {}), broadcasting update",
+                                    manifest.instance_id, manifest.sequence
+                                );
+                                let _ = runtime.broadcast_service_message(ServiceMessage::Advertise(manifest)).await;
+                            }
+                        }
+                    }
+                    _ = shutdown_rx.recv() => {
+                        debug!("Service maintenance loop shutting down");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
     fn spawn_dtn_worker_loop(self: &Arc<Self>) {
         let runtime = Arc::clone(self);
         let mut shutdown_rx = runtime.shutdown_tx.subscribe();
@@ -1377,6 +1880,11 @@ impl FieldnetRuntime {
         if let Ok(runnable) = self.dtn_queue.get_runnable(now, 20) {
             for msg in runnable {
                 if let Some(next_hop) = self.routing_table.get_next_hop(&msg.destination).await {
+                    // Loop prevention: do not dispatch bundle back to its own originator
+                    if next_hop == msg.source {
+                        continue;
+                    }
+
                     if self.connection_manager.is_connected(&next_hop).await {
                         debug!(
                             "DTN Worker: dispatching bundle {} to next hop {}",
@@ -1389,6 +1897,9 @@ impl FieldnetRuntime {
                         {
                             debug!("DTN Worker: dispatch failed to {}: {}", next_hop, e);
                             let _ = self.dtn_queue.record_retry_failure(&msg.message_id);
+                        } else if msg.message_type == MessageType::Service {
+                            // Service discovery messages are idempotent and unacknowledged; clear once dispatched
+                            let _ = self.dtn_queue.remove(&msg.message_id);
                         }
                     } else {
                         let _ = self.dtn_queue.record_retry_failure(&msg.message_id);
@@ -1710,7 +2221,7 @@ impl FieldnetRuntime {
                             .config
                             .blocked_peers
                             .as_ref()
-                            .map_or(false, |b| b.contains(&req.requester_node_id));
+                            .is_some_and(|b| b.contains(&req.requester_node_id));
                         let is_authorized = !is_blocked;
                         let provider_svc = self.transfer_manager.provider_service();
 
@@ -1917,6 +2428,124 @@ impl FieldnetRuntime {
                     }
                 }
             }
+            MessageType::Service => {
+                info!(
+                    "SERVICE message {} received at destination from {} (payload len: {} bytes)",
+                    message.message_id,
+                    message.source,
+                    message.payload.len()
+                );
+
+                match ServiceMessage::from_bytes(&message.payload) {
+                    Ok(service_msg) => match service_msg {
+                        ServiceMessage::RpcRequest(req) => {
+                            info!(
+                                "Handling inbound RPC request {} for service '{}' from {}",
+                                req.request_id, req.service_id, message.source
+                            );
+                            let handler = {
+                                let guard = self.local_service_handlers.read().await;
+                                guard.get(&req.service_id).cloned()
+                            };
+                            let self_clone = Arc::clone(self);
+                            let reply_dest = message.source;
+                            tokio::spawn(async move {
+                                let rpc_resp = if let Some(h) = handler {
+                                    match h.handle_request(req.clone()).await {
+                                        Ok(resp) => resp,
+                                        Err(e) => ServiceRpcResponseWire {
+                                            request_id: req.request_id,
+                                            status_code: 500,
+                                            headers: HashMap::new(),
+                                            body: format!("Handler error: {}", e).into_bytes(),
+                                            responder_node_id: self_clone.node_id(),
+                                            timestamp: Timestamp::now(),
+                                        },
+                                    }
+                                } else {
+                                    ServiceRpcResponseWire {
+                                        request_id: req.request_id,
+                                        status_code: 404,
+                                        headers: HashMap::new(),
+                                        body: format!(
+                                            "Service '{}' not found on provider",
+                                            req.service_id
+                                        )
+                                        .into_bytes(),
+                                        responder_node_id: self_clone.node_id(),
+                                        timestamp: Timestamp::now(),
+                                    }
+                                };
+
+                                if let Err(e) = self_clone
+                                    .send_service_message(
+                                        reply_dest,
+                                        ServiceMessage::RpcResponse(rpc_resp),
+                                    )
+                                    .await
+                                {
+                                    warn!(
+                                        "Failed to dispatch RPC response to {}: {}",
+                                        reply_dest, e
+                                    );
+                                }
+                            });
+                        }
+                        ServiceMessage::RpcResponse(resp) => {
+                            info!(
+                                "Handling inbound RPC response {} from {}",
+                                resp.request_id, message.source
+                            );
+                            let mut pending = self.pending_service_rpcs.write().await;
+                            if let Some(tx) = pending.remove(&resp.request_id) {
+                                let _ = tx.send(resp);
+                            } else {
+                                debug!(
+                                    "Received unsolicited or already timed out RPC response {}",
+                                    resp.request_id
+                                );
+                            }
+                        }
+                        other => {
+                            let now = Timestamp::now();
+                            match self
+                                .service_handler
+                                .handle_inbound_message(&message.source, other, now)
+                                .await
+                            {
+                                Ok(Some(reply_msg)) => {
+                                    let self_clone = Arc::clone(self);
+                                    let reply_dest = message.source;
+                                    tokio::spawn(async move {
+                                        if let Err(e) = self_clone
+                                            .send_service_message(reply_dest, reply_msg)
+                                            .await
+                                        {
+                                            warn!(
+                                                "Failed to dispatch service reply to {}: {}",
+                                                reply_dest, e
+                                            );
+                                        }
+                                    });
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    warn!(
+                                        "ServiceAdvertisementHandler error for message from {}: {}",
+                                        message.source, e
+                                    );
+                                }
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        warn!(
+                            "Malformed ServiceMessage payload from {}: {}",
+                            message.source, e
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -1939,6 +2568,20 @@ impl FieldnetRuntime {
             return;
         }
 
+        // Duplicate suppression at the relay: do not repeatedly forward the same service message ID (cycle prevention)
+        if message.message_type == MessageType::Service {
+            let is_new = self.deduplicator.check_and_record(&message.message_id);
+            if !is_new {
+                warn!(
+                    "Relay node {}: duplicate service message {} detected from peer {}; dropping",
+                    self.node_id(),
+                    message.message_id,
+                    peer_id
+                );
+                return;
+            }
+        }
+
         // Decrement TTL during relay forwarding
         if let Err(e) = message.decrement_ttl() {
             warn!(
@@ -1957,13 +2600,14 @@ impl FieldnetRuntime {
         );
 
         if let Some(next_hop) = self.routing_table.get_next_hop(&destination).await {
-            // Loop prevention: do not bounce packet back to the immediate sender
+            // Loop prevention: do not bounce packet back to the immediate sender; stage in DTN
             if next_hop == peer_id {
                 warn!(
-                    "Relay node {}: routing loop detected (next hop is incoming peer {}); dropping",
+                    "Relay node {}: routing loop detected (next hop is incoming peer {}); staging in DTN queue",
                     self.node_id(),
                     peer_id
                 );
+                let _ = self.dtn_queue.enqueue(&message);
                 return;
             }
 
@@ -2045,10 +2689,345 @@ impl FieldnetRuntime {
         Ok(())
     }
 
+    /// Dispatches an internal service RPC request to either local handlers or across the FIELDNET overlay.
+    pub async fn dispatch_service_rpc(
+        &self,
+        provider_node_id: NodeId,
+        request: ServiceRpcRequestWire,
+    ) -> Result<ServiceRpcResponseWire, GatewayError> {
+        if provider_node_id == self.node_id() {
+            let handler = {
+                let guard = self.local_service_handlers.read().await;
+                guard.get(&request.service_id).cloned()
+            };
+            if let Some(h) = handler {
+                h.handle_request(request)
+                    .await
+                    .map_err(GatewayError::Service)
+            } else {
+                Err(GatewayError::Service(ServiceError::ServiceNotFound(
+                    request.service_id.to_string(),
+                )))
+            }
+        } else {
+            let req_id = request.request_id;
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            {
+                let mut pending = self.pending_service_rpcs.write().await;
+                pending.insert(req_id, tx);
+            }
+
+            let deadline = request.deadline;
+            let now = Timestamp::now();
+            let timeout_ms = if deadline.as_millis() > now.as_millis() {
+                (deadline.as_millis() - now.as_millis()).min(15_000)
+            } else {
+                10_000
+            };
+
+            let service_msg = ServiceMessage::RpcRequest(request);
+            if let Err(e) = self
+                .send_service_message(provider_node_id, service_msg)
+                .await
+            {
+                let mut pending = self.pending_service_rpcs.write().await;
+                pending.remove(&req_id);
+                return Err(GatewayError::Service(ServiceError::ResolutionFailed(
+                    format!(
+                        "Failed to send RPC message over overlay to {}: {}",
+                        provider_node_id, e
+                    ),
+                )));
+            }
+
+            match tokio::time::timeout(Duration::from_millis(timeout_ms), rx).await {
+                Ok(Ok(resp)) => Ok(resp),
+                Ok(Err(_)) => {
+                    let mut pending = self.pending_service_rpcs.write().await;
+                    pending.remove(&req_id);
+                    Err(GatewayError::ServerError(
+                        "RPC response channel dropped".to_string(),
+                    ))
+                }
+                Err(_) => {
+                    let mut pending = self.pending_service_rpcs.write().await;
+                    pending.remove(&req_id);
+                    Err(GatewayError::Timeout { timeout_ms })
+                }
+            }
+        }
+    }
+
+    /// Registers a local request handler for in-process service execution.
+    pub async fn register_service_handler(
+        &self,
+        service_id: ServiceId,
+        handler: Arc<dyn ServiceRequestHandler>,
+    ) {
+        let mut guard = self.local_service_handlers.write().await;
+        guard.insert(service_id, handler);
+    }
+
+    /// Starts or restarts the Local Web Gateway for this runtime instance.
+    pub async fn start_gateway(
+        &self,
+        config: Option<GatewayConfig>,
+    ) -> Result<std::net::SocketAddr, GatewayError> {
+        self.start_gateway_with_mdns(config, None).await
+    }
+
+    /// Starts or restarts the Local Web Gateway with explicit mDNS configuration.
+    pub async fn start_gateway_with_mdns(
+        &self,
+        config: Option<GatewayConfig>,
+        mdns_config: Option<MdnsConfig>,
+    ) -> Result<std::net::SocketAddr, GatewayError> {
+        let mut guard = self.local_web_gateway.write().await;
+        if let Some(existing) = guard.as_ref() {
+            if existing.is_running().await {
+                if let Some(addr) = existing.local_addr().await {
+                    return Ok(addr);
+                }
+            }
+        }
+
+        let weak_rt = {
+            let ws_guard = self.weak_self.read().await;
+            ws_guard.clone().ok_or_else(|| {
+                GatewayError::ServerError("Runtime weak reference uninitialized".to_string())
+            })?
+        };
+
+        let gw_config = config.unwrap_or_default();
+        let dispatcher = Arc::new(RuntimeServiceDispatcher { runtime: weak_rt });
+
+        let gateway = Arc::new(
+            LocalWebGateway::new(
+                gw_config,
+                self.node_id(),
+                Arc::clone(&self.service_registry),
+                Arc::clone(&self.service_resolver),
+                dispatcher,
+                Some(Arc::clone(&self.content_store)),
+            )
+            .with_event_tx(self.service_event_tx.clone()),
+        );
+
+        let addr = gateway.start().await?;
+        *guard = Some(gateway);
+
+        // mDNS integration: start mDNS daemon advertising this gateway on actual listener port
+        let mut mdns_cfg = if let Some(cfg) = mdns_config {
+            cfg
+        } else {
+            let mdns_file = self.config.data_dir.join("mdns.json");
+            if mdns_file.exists() {
+                if let Ok(content) = tokio::fs::read_to_string(&mdns_file).await {
+                    serde_json::from_str(&content).unwrap_or_default()
+                } else {
+                    MdnsConfig::default()
+                }
+            } else {
+                MdnsConfig::default()
+            }
+        };
+
+        mdns_cfg.gateway_port = addr.port();
+
+        if mdns_cfg.enabled {
+            let mdns = Arc::new(MdnsService::new(
+                self.node_id(),
+                mdns_cfg,
+                Some(self.service_event_tx.clone()),
+            ));
+            if let Err(e) = mdns.start().await {
+                warn!(
+                    "mDNS service failed to start: {} (runtime and gateway continuing)",
+                    e
+                );
+            }
+            let mut mdns_guard = self.mdns_service.write().await;
+            *mdns_guard = Some(mdns);
+        }
+
+        Ok(addr)
+    }
+
+    /// Stops the active Local Web Gateway and withdraws mDNS advertisements, if running.
+    pub async fn stop_gateway(&self) -> Result<(), GatewayError> {
+        let mdns = {
+            let mut guard = self.mdns_service.write().await;
+            guard.take()
+        };
+        if let Some(m) = mdns {
+            let _ = m.stop().await;
+        }
+
+        let mut guard = self.local_web_gateway.write().await;
+        if let Some(existing) = guard.take() {
+            existing.stop().await?;
+        }
+        Ok(())
+    }
+
+    /// Accessor for the active `LocalWebGateway` instance.
+    pub async fn gateway(&self) -> Option<Arc<LocalWebGateway>> {
+        let guard = self.local_web_gateway.read().await;
+        guard.clone()
+    }
+
+    /// Accessor for the active `MdnsService` instance.
+    pub async fn mdns(&self) -> Option<Arc<MdnsService>> {
+        let guard = self.mdns_service.read().await;
+        guard.clone()
+    }
+
+    /// Explicitly starts the mDNS daemon with optional configuration.
+    pub async fn start_mdns(
+        &self,
+        config: Option<MdnsConfig>,
+    ) -> Result<Arc<MdnsService>, MdnsError> {
+        let mut guard = self.mdns_service.write().await;
+        if let Some(existing) = guard.as_ref() {
+            if existing.state() == MdnsState::Running {
+                return Ok(existing.clone());
+            }
+        }
+
+        let cfg = config.unwrap_or_default();
+        let mdns = Arc::new(MdnsService::new(
+            self.node_id(),
+            cfg,
+            Some(self.service_event_tx.clone()),
+        ));
+        mdns.start().await?;
+        *guard = Some(mdns.clone());
+        Ok(mdns)
+    }
+
+    /// Explicitly stops the mDNS daemon.
+    pub async fn stop_mdns(&self) -> Result<(), MdnsError> {
+        let mut guard = self.mdns_service.write().await;
+        if let Some(existing) = guard.take() {
+            existing.stop().await?;
+        }
+        Ok(())
+    }
+
+    /// Returns detailed mDNS subsystem status and metrics.
+    pub async fn mdns_status(&self) -> Option<MdnsStatusInfo> {
+        let guard = self.mdns_service.read().await;
+        if let Some(mdns) = guard.as_ref() {
+            let (queries, responses, errors, active_announcements) = mdns.metrics();
+            Some(MdnsStatusInfo {
+                state: mdns.state(),
+                hostname: mdns.active_hostname().await,
+                advertised_port: mdns.advertised_port(),
+                service_type: mdns.service_type().to_string(),
+                service_name: mdns.service_name().to_string(),
+                interfaces: fieldnet_service::get_interface_summaries(),
+                last_error: mdns.last_error().await,
+                queries_count: queries,
+                responses_count: responses,
+                errors_count: errors,
+                active_announcements,
+            })
+        } else {
+            None
+        }
+    }
+
     pub fn shutdown(&self) {
         info!("Shutting down FIELDNET Runtime");
         let _ = self.shutdown_tx.send(());
         self.discovery.shutdown();
         self.connection_manager.shutdown();
+        let mdns = {
+            if let Ok(mut guard) = self.mdns_service.try_write() {
+                guard.take()
+            } else {
+                None
+            }
+        };
+        if let Some(m) = mdns {
+            tokio::spawn(async move {
+                let _ = m.stop().await;
+            });
+        }
+        let gw = {
+            if let Ok(mut guard) = self.local_web_gateway.try_write() {
+                guard.take()
+            } else {
+                None
+            }
+        };
+        if let Some(g) = gw {
+            tokio::spawn(async move {
+                let _ = g.stop().await;
+            });
+        }
+    }
+}
+
+/// Inspection information structure for mDNS status reporting.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MdnsStatusInfo {
+    pub state: MdnsState,
+    pub hostname: String,
+    pub advertised_port: u16,
+    pub service_type: String,
+    pub service_name: String,
+    pub interfaces: Vec<String>,
+    pub last_error: Option<String>,
+    pub queries_count: usize,
+    pub responses_count: usize,
+    pub errors_count: usize,
+    pub active_announcements: usize,
+}
+
+/// Service dispatcher bridging the gateway into the FIELDNET runtime overlay.
+pub struct RuntimeServiceDispatcher {
+    runtime: std::sync::Weak<FieldnetRuntime>,
+}
+
+#[async_trait]
+impl ServiceDispatcher for RuntimeServiceDispatcher {
+    async fn dispatch_rpc(
+        &self,
+        provider_node_id: NodeId,
+        request: ServiceRpcRequestWire,
+    ) -> Result<ServiceRpcResponseWire, GatewayError> {
+        let rt = self.runtime.upgrade().ok_or_else(|| {
+            GatewayError::ServerError("Runtime instance has been shut down".to_string())
+        })?;
+        rt.dispatch_service_rpc(provider_node_id, request).await
+    }
+}
+
+/// Application network adapter bridging WASM host calls to the FIELDNET routing and transport overlay.
+pub struct RuntimeApplicationNetworkSender {
+    runtime: std::sync::Weak<FieldnetRuntime>,
+}
+
+#[async_trait]
+impl ApplicationNetworkSender for RuntimeApplicationNetworkSender {
+    async fn send_message(
+        &self,
+        msg: ApplicationNetworkMessage,
+    ) -> Result<String, ApplicationError> {
+        let rt = self.runtime.upgrade().ok_or_else(|| {
+            ApplicationError::ExecutionError("Runtime instance has been shut down".to_string())
+        })?;
+        let payload_str = match std::str::from_utf8(&msg.payload) {
+            Ok(s) => s.to_string(),
+            Err(_) => format!("hex:{}", hex::encode(&msg.payload)),
+        };
+        let msg_id = rt
+            .send_data_message(msg.destination, &payload_str)
+            .await
+            .map_err(|e| {
+                ApplicationError::ExecutionError(format!("Network routing failed: {}", e))
+            })?;
+        Ok(msg_id.to_string())
     }
 }

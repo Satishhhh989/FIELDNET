@@ -786,8 +786,10 @@ async fn test_10_malformed_sync_payload_survives() {
 async fn test_13_large_operation_set_bounded_batches() {
     let transport = Arc::new(MemoryMeshTransport::new());
     // Max batch size configured to 50 operations
-    let mut config = SyncEngineConfig::default();
-    config.max_batch_size = 50;
+    let config = SyncEngineConfig {
+        max_batch_size: 50,
+        ..Default::default()
+    };
 
     let node_a = TestNode::new(transport.clone(), Some(config.clone())).await;
     let node_b = TestNode::new(transport.clone(), Some(config)).await;
@@ -834,8 +836,10 @@ async fn test_14_partial_replication_filters() {
         .unwrap();
 
     // Node B configures a partial replication filter allowing ONLY doc_wanted
-    let mut filter_config = SyncEngineConfig::default();
-    filter_config.document_filter = Some(vec![doc_wanted.document_id]);
+    let filter_config = SyncEngineConfig {
+        document_filter: Some(vec![doc_wanted.document_id]),
+        ..Default::default()
+    };
     let node_b = TestNode::new(transport.clone(), Some(filter_config)).await;
 
     // Synchronize

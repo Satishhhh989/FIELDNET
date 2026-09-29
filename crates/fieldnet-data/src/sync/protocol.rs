@@ -174,23 +174,20 @@ impl SyncMessage {
 
     /// Validates payload size and batch counts.
     pub fn validate_limits(&self) -> Result<(), DataError> {
-        match self {
-            Self::DeltaResponse { operations, .. } => {
-                if operations.len() > MAX_SYNC_BATCH_OPERATIONS {
-                    return Err(DataError::BatchSizeExceeded {
-                        size: operations.len(),
-                        max: MAX_SYNC_BATCH_OPERATIONS,
-                    });
-                }
-                let total_payload_bytes: usize = operations.iter().map(|op| op.payload.len()).sum();
-                if total_payload_bytes > MAX_SYNC_BATCH_BYTES {
-                    return Err(DataError::BatchSizeExceeded {
-                        size: total_payload_bytes,
-                        max: MAX_SYNC_BATCH_BYTES,
-                    });
-                }
+        if let Self::DeltaResponse { operations, .. } = self {
+            if operations.len() > MAX_SYNC_BATCH_OPERATIONS {
+                return Err(DataError::BatchSizeExceeded {
+                    size: operations.len(),
+                    max: MAX_SYNC_BATCH_OPERATIONS,
+                });
             }
-            _ => {}
+            let total_payload_bytes: usize = operations.iter().map(|op| op.payload.len()).sum();
+            if total_payload_bytes > MAX_SYNC_BATCH_BYTES {
+                return Err(DataError::BatchSizeExceeded {
+                    size: total_payload_bytes,
+                    max: MAX_SYNC_BATCH_BYTES,
+                });
+            }
         }
         Ok(())
     }

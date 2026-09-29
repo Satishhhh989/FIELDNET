@@ -453,13 +453,13 @@ async fn test_07_property_testing_roundtrip_all_sizes() {
         let (cid, _, _) = store
             .put_chunked_stream(&mut payload.as_slice(), None)
             .await
-            .expect(&format!("Failed to store chunked content of size {}", size));
+            .unwrap_or_else(|_| panic!("Failed to store chunked content of size {}", size));
 
         // Reconstruct
         let reconstructed = store
             .reconstruct_to_bytes(&cid)
             .await
-            .expect(&format!("Failed to reconstruct content of size {}", size));
+            .unwrap_or_else(|_| panic!("Failed to reconstruct content of size {}", size));
 
         // Invariant: original bytes == reconstructed bytes
         assert_eq!(
@@ -592,9 +592,11 @@ async fn test_09_performance_baseline_metrics() {
         ingest_dur,
         ingest_mb_per_sec
     );
+    let min_ingest_mb = if cfg!(debug_assertions) { 2.0 } else { 5.0 };
     assert!(
-        ingest_mb_per_sec > 5.0,
-        "Ingestion throughput should exceed 5 MB/s"
+        ingest_mb_per_sec > min_ingest_mb,
+        "Ingestion throughput should exceed {} MB/s",
+        min_ingest_mb
     );
 
     // 3. Reconstruction Throughput

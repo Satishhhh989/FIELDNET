@@ -178,7 +178,7 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let mut csprng = OsRng;
-    let local_ephemeral_secret = EphemeralSecret::random_from_rng(&mut csprng);
+    let local_ephemeral_secret = EphemeralSecret::random_from_rng(csprng);
     let local_ephemeral_pubkey = X25519PublicKey::from(&local_ephemeral_secret);
 
     let mut init_nonce = [0u8; 32];
@@ -296,7 +296,7 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let mut csprng = OsRng;
-    let local_ephemeral_secret = EphemeralSecret::random_from_rng(&mut csprng);
+    let local_ephemeral_secret = EphemeralSecret::random_from_rng(csprng);
     let local_ephemeral_pubkey = X25519PublicKey::from(&local_ephemeral_secret);
 
     let mut resp_nonce = [0u8; 32];

@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use fieldnet_content::auth::ContentAction;
 use fieldnet_content::transfer::TransferState;
-use fieldnet_core::NodeId;
 use fieldnet_identity::NodeIdentity;
 use fieldnet_runtime::{FieldnetRuntime, RuntimeConfig};
 
@@ -937,7 +936,7 @@ async fn test_scenario_07_dtn_multihop_partition_recovery() {
     fs::create_dir_all(&dir_c).unwrap();
 
     let port_ab = 5237;
-    let port_bc = 5238;
+    let _port_bc = 5238;
 
     let id_a = NodeIdentity::generate();
     id_a.save_to_file(&dir_a.join("identity.json")).unwrap();

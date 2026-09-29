@@ -1,0 +1,33 @@
+[package]
+name = "fieldnet-service"
+version = "0.1.0"
+edition = "2021"
+description = "FIELDNET Service Discovery, Registry, Manifests, and Local Web Architecture (Phase 08)"
+
+[dependencies]
+fieldnet-core = { workspace = true }
+fieldnet-identity = { workspace = true }
+fieldnet-protocol = { workspace = true }
+fieldnet-content = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+rusqlite = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+rand = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+http-body-util = { workspace = true }
+tokio-util = { workspace = true }
+socket2 = { workspace = true }
+simple-dns = { workspace = true }
+if-addrs = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.8"

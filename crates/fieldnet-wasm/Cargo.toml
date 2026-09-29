@@ -1,0 +1,28 @@
+[package]
+name = "fieldnet-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "FIELDNET Application Model, Package System, and Sandboxed Runtime (Phase 09)"
+
+[dependencies]
+fieldnet-core = { workspace = true }
+fieldnet-identity = { workspace = true }
+fieldnet-protocol = { workspace = true }
+fieldnet-content = { workspace = true }
+fieldnet-service = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+rusqlite = { workspace = true }
+async-trait = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+wasmtime = "27.0"
+
+[dev-dependencies]
+tempfile = "3.8"
+wat = "1.259"

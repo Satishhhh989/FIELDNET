@@ -10,6 +10,7 @@ pub enum MessageType {
     Route = 5,
     Sync = 6,
     File = 7,
+    Service = 8,
 }
 
 impl MessageType {
@@ -22,6 +23,7 @@ impl MessageType {
             Self::Route => false,
             Self::Sync => true,
             Self::File => true,
+            Self::Service => true,
         }
     }
 }

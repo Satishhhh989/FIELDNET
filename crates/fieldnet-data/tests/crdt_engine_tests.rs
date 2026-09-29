@@ -392,7 +392,7 @@ fn test_12_delete_tombstone_prevents_stale_resurrection() {
             OperationType::CrdtDelta,
             &b"stale_state"[..],
             &HybridLogicalClock::new(50, 0),
-            &vec![create_op.op_id],
+            &[create_op.op_id],
             1,
         ),
         document_id: doc.document_id,
