@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use fieldnet_core::NodeId;
-use fieldnet_runtime::app::{ApplicationId, ApplicationPackage, CapabilityContext, ExecutionId};
+use fieldnet_runtime::app::{
+    AppVersion, ApplicationId, ApplicationPackage, CapabilityContext, ExecutionId,
+};
 use fieldnet_runtime::service::{ServiceId, ServiceQuery};
 use fieldnet_runtime::{FieldnetRuntime, RuntimeConfig};
 use std::path::PathBuf;
@@ -84,10 +86,56 @@ enum AppCommand {
         /// ApplicationId to execute
         application: String,
     },
-    /// Stop an active application execution
+    /// Start an authorized application through the lifecycle manager
+    Start {
+        /// ApplicationId to start
+        application: String,
+    },
+    /// Stop an active application execution by ExecutionId
     Stop {
         /// ExecutionId to stop
         execution: String,
+    },
+    /// Stop all active executions of an application by ApplicationId
+    StopApp {
+        /// ApplicationId to stop
+        application: String,
+    },
+    /// Gracefully restart an application
+    Restart {
+        /// ApplicationId to restart
+        application: String,
+    },
+    /// Inspect dependency resolution status and graph
+    Dependencies {
+        /// ApplicationId to inspect
+        application: String,
+    },
+    /// Roll back an application to a previous version
+    Rollback {
+        /// ApplicationId to roll back
+        application: String,
+        /// Optional specific target version to restore
+        #[arg(long)]
+        target_version: Option<String>,
+    },
+    /// Quarantine / isolate an application from running
+    Isolate {
+        /// ApplicationId to isolate
+        application: String,
+        /// Reason for administrative or security isolation
+        #[arg(long, default_value = "Administrative quarantine")]
+        reason: String,
+    },
+    /// Lift quarantine / isolation from an application
+    Unisolate {
+        /// ApplicationId to unisolate
+        application: String,
+    },
+    /// Safely uninstall an application
+    Uninstall {
+        /// ApplicationId to uninstall
+        application: String,
     },
     /// List all currently active application executions
     Executions,
@@ -350,6 +398,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             for h in history {
                                 println!("  - Version {} (hash: {})", h.version, h.package_hash);
                             }
+                            if let Ok(crashes) =
+                                runtime.application_registry().get_crash_history(&app_id)
+                            {
+                                println!("Recent Crashes ({}):", crashes.len());
+                                for c in &crashes {
+                                    println!(
+                                        "  - [{}] Version {}: {}",
+                                        c.crashed_at, c.version, c.reason
+                                    );
+                                }
+                            }
+                            if let Ok(true) = runtime.application_registry().is_isolated(&app_id) {
+                                let reason = runtime
+                                    .application_registry()
+                                    .get_isolation_reason(&app_id)
+                                    .unwrap_or(None);
+                                println!(
+                                    "Isolation:        QUARANTINED (Reason: {})",
+                                    reason.as_deref().unwrap_or("None")
+                                );
+                            }
                             println!("{}", "=".repeat(60));
                         }
                         None => {
@@ -461,6 +530,211 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     );
                 }
             }
+            AppCommand::Start { application } => match ApplicationId::new(&application) {
+                Ok(app_id) => {
+                    println!("STARTING APPLICATION: {}", app_id);
+                    println!("{}", "=".repeat(60));
+                    match runtime.start_application(&app_id).await {
+                        Ok(report) => {
+                            println!("Execution ID:     {}", report.execution_id);
+                            println!("Application ID:   {}", report.application_id);
+                            println!("Duration:         {} ms", report.duration_ms);
+                            println!("Fuel Consumed:    {}", report.fuel_consumed);
+                            println!("Exit Code:        {:?}", report.exit_code);
+                            println!("Final State:      {:?}", report.final_state);
+                            println!("RESULT:           START SUCCESS");
+                        }
+                        Err(e) => {
+                            println!("Start Failed:     {}", e);
+                            println!("RESULT:           START FAILED");
+                        }
+                    }
+                    println!("{}", "=".repeat(60));
+                }
+                Err(e) => {
+                    println!("Invalid ApplicationId '{}': {}", application, e);
+                }
+            },
+            AppCommand::StopApp { application } => match ApplicationId::new(&application) {
+                Ok(app_id) => match runtime.stop_application(&app_id).await {
+                    Ok(()) => {
+                        println!("Application '{}' stopped successfully.", app_id);
+                    }
+                    Err(e) => {
+                        println!("Failed to stop application '{}': {}", app_id, e);
+                    }
+                },
+                Err(e) => {
+                    println!("Invalid ApplicationId '{}': {}", application, e);
+                }
+            },
+            AppCommand::Restart { application } => match ApplicationId::new(&application) {
+                Ok(app_id) => {
+                    println!("RESTARTING APPLICATION: {}", app_id);
+                    println!("{}", "=".repeat(60));
+                    match runtime.restart_application(&app_id).await {
+                        Ok(report) => {
+                            println!("Execution ID:     {}", report.execution_id);
+                            println!("Application ID:   {}", report.application_id);
+                            println!("Duration:         {} ms", report.duration_ms);
+                            println!("Exit Code:        {:?}", report.exit_code);
+                            println!("Final State:      {:?}", report.final_state);
+                            println!("RESULT:           RESTART SUCCESS");
+                        }
+                        Err(e) => {
+                            println!("Restart Failed:   {}", e);
+                            println!("RESULT:           RESTART FAILED");
+                        }
+                    }
+                    println!("{}", "=".repeat(60));
+                }
+                Err(e) => {
+                    println!("Invalid ApplicationId '{}': {}", application, e);
+                }
+            },
+            AppCommand::Dependencies { application } => match ApplicationId::new(&application) {
+                Ok(app_id) => {
+                    println!("DEPENDENCY ANALYSIS: {}", app_id);
+                    println!("{}", "=".repeat(60));
+                    match runtime.resolve_application_dependencies(&app_id).await {
+                        Ok(report) => {
+                            println!(
+                                "Resolved Status:  {}",
+                                if report.all_satisfied {
+                                    "ALL SATISFIED"
+                                } else {
+                                    "UNSATISFIED"
+                                }
+                            );
+                            println!("Dependencies ({}):", report.dependencies.len());
+                            for d in &report.dependencies {
+                                let status = if d.satisfied {
+                                    if d.available {
+                                        "SATISFIED"
+                                    } else {
+                                        "OPTIONAL-MISSING"
+                                    }
+                                } else {
+                                    "MISSING/INCOMPATIBLE"
+                                };
+                                println!(
+                                    "  - [{}] {} ({}, {:?}, resolved: {:?})",
+                                    status,
+                                    d.dependency.identity,
+                                    d.dependency.version_requirement,
+                                    d.dependency.dependency_type,
+                                    d.resolved_version
+                                );
+                            }
+                            if !report.missing_required.is_empty() {
+                                println!("Missing Required ({}):", report.missing_required.len());
+                                for m in &report.missing_required {
+                                    println!("  - {}", m);
+                                }
+                            }
+                            if !report.missing_optional.is_empty() {
+                                println!("Missing Optional ({}):", report.missing_optional.len());
+                                for m in &report.missing_optional {
+                                    println!("  - {}", m);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("Dependency Resolution Failed: {}", e);
+                        }
+                    }
+                    println!("{}", "=".repeat(60));
+                }
+                Err(e) => {
+                    println!("Invalid ApplicationId '{}': {}", application, e);
+                }
+            },
+            AppCommand::Rollback {
+                application,
+                target_version,
+            } => match ApplicationId::new(&application) {
+                Ok(app_id) => {
+                    let parsed_target = match target_version {
+                        Some(ref v) => match AppVersion::from_str(v) {
+                            Ok(ver) => Some(ver),
+                            Err(e) => {
+                                println!("Invalid target version '{}': {}", v, e);
+                                runtime.shutdown();
+                                return Ok(());
+                            }
+                        },
+                        None => None,
+                    };
+
+                    println!("ROLLING BACK APPLICATION: {}", app_id);
+                    println!("{}", "=".repeat(60));
+                    match runtime
+                        .rollback_application_to_version(&app_id, parsed_target.as_ref())
+                        .await
+                    {
+                        Ok(record) => {
+                            println!("Rolled Back To:   Version {}", record.installed_version);
+                            println!("Package ID:       {}", record.package_id);
+                            println!("Package Hash:     {}", record.package_hash);
+                            println!("State:            {:?}", record.lifecycle_state);
+                            println!("RESULT:           ROLLBACK SUCCESS");
+                        }
+                        Err(e) => {
+                            println!("Rollback Failed:  {}", e);
+                            println!("RESULT:           ROLLBACK FAILED");
+                        }
+                    }
+                    println!("{}", "=".repeat(60));
+                }
+                Err(e) => {
+                    println!("Invalid ApplicationId '{}': {}", application, e);
+                }
+            },
+            AppCommand::Isolate {
+                application,
+                reason,
+            } => match ApplicationId::new(&application) {
+                Ok(app_id) => match runtime.isolate_application(&app_id, &reason).await {
+                    Ok(()) => {
+                        println!("Application '{}' quarantined/isolated: {}", app_id, reason);
+                    }
+                    Err(e) => {
+                        println!("Failed to isolate application '{}': {}", app_id, e);
+                    }
+                },
+                Err(e) => {
+                    println!("Invalid ApplicationId '{}': {}", application, e);
+                }
+            },
+            AppCommand::Unisolate { application } => match ApplicationId::new(&application) {
+                Ok(app_id) => match runtime.unisolate_application(&app_id).await {
+                    Ok(state) => {
+                        println!(
+                            "Application '{}' quarantine lifted. Restored state: {:?}",
+                            app_id, state
+                        );
+                    }
+                    Err(e) => {
+                        println!("Failed to unisolate application '{}': {}", app_id, e);
+                    }
+                },
+                Err(e) => {
+                    println!("Invalid ApplicationId '{}': {}", application, e);
+                }
+            },
+            AppCommand::Uninstall { application } => match ApplicationId::new(&application) {
+                Ok(app_id) => match runtime.uninstall_application(&app_id).await {
+                    Ok(()) => {
+                        println!("Application '{}' uninstalled successfully.", app_id);
+                    }
+                    Err(e) => {
+                        println!("Failed to uninstall application '{}': {}", app_id, e);
+                    }
+                },
+                Err(e) => {
+                    println!("Invalid ApplicationId '{}': {}", application, e);
+                }
+            },
         }
         runtime.shutdown();
         return Ok(());

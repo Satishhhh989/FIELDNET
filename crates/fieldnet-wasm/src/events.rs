@@ -42,11 +42,65 @@ pub enum ApplicationEvent {
         granted_permissions: Vec<AppPermission>,
     },
 
+    /// Dependency checking initiated for an application.
+    DependencyChecking {
+        application_id: ApplicationId,
+        dependency_count: usize,
+    },
+
+    /// Dependency resolution failed for an application.
+    DependencyFailed {
+        application_id: ApplicationId,
+        reason: String,
+    },
+
+    /// Application update transaction started.
+    UpdateStarted {
+        application_id: ApplicationId,
+        target_version: String,
+        package_id: PackageId,
+    },
+
+    /// Application update staged into CAS and validated.
+    UpdateStaged {
+        application_id: ApplicationId,
+        version: String,
+        package_id: PackageId,
+    },
+
+    /// Application update activated and committed.
+    UpdateActivated {
+        application_id: ApplicationId,
+        from_version: String,
+        to_version: String,
+        package_id: PackageId,
+    },
+
+    /// Application update failed and was aborted.
+    UpdateFailed {
+        application_id: ApplicationId,
+        target_version: String,
+        reason: String,
+    },
+
     /// Application was upgraded to a new package version.
     Updated {
         application_id: ApplicationId,
         from_version: String,
         to_version: String,
+        package_id: PackageId,
+    },
+
+    /// Application rollback initiated.
+    RollbackStarted {
+        application_id: ApplicationId,
+        target_version: String,
+    },
+
+    /// Application rollback completed successfully.
+    RollbackCompleted {
+        application_id: ApplicationId,
+        restored_version: String,
         package_id: PackageId,
     },
 
@@ -101,6 +155,9 @@ pub enum ApplicationEvent {
         timestamp: u64,
     },
 
+    /// Application uninstalled from node catalog.
+    Uninstalled { application_id: ApplicationId },
+
     /// A custom event published by an authorized application guest.
     Custom {
         application_id: ApplicationId,
@@ -120,13 +177,22 @@ impl ApplicationEvent {
             Self::Installing { .. } => "application.installing",
             Self::Installed { .. } => "application.installed",
             Self::Authorized { .. } => "application.authorized",
+            Self::DependencyChecking { .. } => "application.dependency_checking",
+            Self::DependencyFailed { .. } => "application.dependency_failed",
+            Self::UpdateStarted { .. } => "application.update_started",
+            Self::UpdateStaged { .. } => "application.update_staged",
+            Self::UpdateActivated { .. } => "application.update_activated",
+            Self::UpdateFailed { .. } => "application.update_failed",
             Self::Updated { .. } => "application.updated",
+            Self::RollbackStarted { .. } => "application.rollback_started",
+            Self::RollbackCompleted { .. } => "application.rollback_completed",
             Self::Rollback { .. } => "application.rollback",
             Self::Starting { .. } => "application.starting",
             Self::Started { .. } => "application.started",
             Self::Stopped { .. } => "application.stopped",
             Self::Crashed { .. } => "application.crashed",
             Self::Isolated { .. } => "application.isolated",
+            Self::Uninstalled { .. } => "application.uninstalled",
             Self::Custom { topic, .. } => topic.as_str(),
         }
     }
@@ -139,13 +205,22 @@ impl ApplicationEvent {
             Self::Installing { application_id, .. } => application_id,
             Self::Installed { application_id, .. } => application_id,
             Self::Authorized { application_id, .. } => application_id,
+            Self::DependencyChecking { application_id, .. } => application_id,
+            Self::DependencyFailed { application_id, .. } => application_id,
+            Self::UpdateStarted { application_id, .. } => application_id,
+            Self::UpdateStaged { application_id, .. } => application_id,
+            Self::UpdateActivated { application_id, .. } => application_id,
+            Self::UpdateFailed { application_id, .. } => application_id,
             Self::Updated { application_id, .. } => application_id,
+            Self::RollbackStarted { application_id, .. } => application_id,
+            Self::RollbackCompleted { application_id, .. } => application_id,
             Self::Rollback { application_id, .. } => application_id,
             Self::Starting { application_id, .. } => application_id,
             Self::Started { application_id, .. } => application_id,
             Self::Stopped { application_id, .. } => application_id,
             Self::Crashed { application_id, .. } => application_id,
             Self::Isolated { application_id, .. } => application_id,
+            Self::Uninstalled { application_id, .. } => application_id,
             Self::Custom { application_id, .. } => application_id,
         }
     }

@@ -17,10 +17,12 @@ use fieldnet_service::{
     ServiceRpcRequestWire, ServiceRpcResponseWire, ServiceWithdrawal,
 };
 use fieldnet_wasm::{
-    ActiveExecutionInfo, ApplicationError, ApplicationEvent, ApplicationExecutionSupervisor,
-    ApplicationId, ApplicationInstaller, ApplicationNetworkMessage, ApplicationNetworkSender,
-    ApplicationPackage, ApplicationRecord, ApplicationRegistry, ApplicationState, ExecutionId,
-    ExecutionReport, ModuleCache, WasmEngine,
+    ActiveExecutionInfo, AppVersion, ApplicationError, ApplicationEvent,
+    ApplicationExecutionSupervisor, ApplicationId, ApplicationInstaller,
+    ApplicationLifecycleManager, ApplicationNetworkMessage, ApplicationNetworkSender,
+    ApplicationPackage, ApplicationRecord, ApplicationRegistry, ApplicationState,
+    DependencyResolutionReport, DependencyResolver, ExecutionId, ExecutionReport, ModuleCache,
+    WasmEngine,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -129,6 +131,8 @@ pub struct FieldnetRuntime {
     application_registry: Arc<ApplicationRegistry>,
     application_installer: Arc<ApplicationInstaller>,
     application_supervisor: Arc<ApplicationExecutionSupervisor>,
+    dependency_resolver: Arc<DependencyResolver>,
+    application_lifecycle_manager: Arc<ApplicationLifecycleManager>,
     application_event_tx: broadcast::Sender<ApplicationEvent>,
     weak_self: Arc<RwLock<Option<std::sync::Weak<FieldnetRuntime>>>>,
 }
@@ -289,13 +293,19 @@ impl FieldnetRuntime {
             application_event_tx.clone(),
         ));
 
-        // Reconcile dangling application executions interrupted by node restart
-        if let Err(e) = application_supervisor.reconcile_on_startup() {
-            warn!(
-                "Failed to reconcile application lifecycle states on startup: {}",
-                e
-            );
-        }
+        let dependency_resolver = Arc::new(DependencyResolver::new(
+            Arc::clone(&application_registry),
+            Some(Arc::clone(&service_resolver)),
+            Some(Arc::clone(&content_store)),
+        ));
+        let application_lifecycle_manager = Arc::new(ApplicationLifecycleManager::new(
+            Arc::clone(&application_registry),
+            Arc::clone(&application_installer),
+            Arc::clone(&application_supervisor),
+            Arc::clone(&dependency_resolver),
+            Arc::clone(&content_store),
+            application_event_tx.clone(),
+        ));
 
         let runtime = Arc::new(Self {
             config,
@@ -329,6 +339,8 @@ impl FieldnetRuntime {
             application_registry,
             application_installer,
             application_supervisor,
+            dependency_resolver,
+            application_lifecycle_manager,
             application_event_tx,
             weak_self: Arc::new(RwLock::new(None)),
         });
@@ -353,6 +365,18 @@ impl FieldnetRuntime {
                 runtime: Arc::downgrade(&runtime),
             }))
             .await;
+
+        // 3g. Reconcile application lifecycle states and interrupted updates on startup (Phase 09 Build 04)
+        if let Err(e) = runtime
+            .application_lifecycle_manager
+            .reconcile_on_startup()
+            .await
+        {
+            warn!(
+                "Failed to reconcile application lifecycle states on startup: {}",
+                e
+            );
+        }
 
         // 5b. Start Local Web Gateway if configured via gateway.json
         let gateway_config_path = runtime.config.data_dir.join("gateway.json");
@@ -756,6 +780,14 @@ impl FieldnetRuntime {
         &self.application_supervisor
     }
 
+    pub fn application_lifecycle_manager(&self) -> &Arc<ApplicationLifecycleManager> {
+        &self.application_lifecycle_manager
+    }
+
+    pub fn dependency_resolver(&self) -> &Arc<DependencyResolver> {
+        &self.dependency_resolver
+    }
+
     pub fn subscribe_application_events(&self) -> broadcast::Receiver<ApplicationEvent> {
         self.application_event_tx.subscribe()
     }
@@ -770,6 +802,16 @@ impl FieldnetRuntime {
             .await
     }
 
+    pub async fn install_application_managed(
+        &self,
+        package: &ApplicationPackage,
+        item_payloads: &HashMap<String, Vec<u8>>,
+    ) -> Result<ApplicationRecord, ApplicationError> {
+        self.application_lifecycle_manager
+            .install(package, item_payloads)
+            .await
+    }
+
     pub async fn rollback_application(
         &self,
         app_id: &ApplicationId,
@@ -777,11 +819,82 @@ impl FieldnetRuntime {
         self.application_installer.rollback(app_id).await
     }
 
+    pub async fn rollback_application_to_version(
+        &self,
+        app_id: &ApplicationId,
+        target_version: Option<&AppVersion>,
+    ) -> Result<ApplicationRecord, ApplicationError> {
+        self.application_lifecycle_manager
+            .rollback(app_id, target_version)
+            .await
+    }
+
     pub async fn run_application(
         &self,
         app_id: &ApplicationId,
     ) -> Result<ExecutionReport, ApplicationError> {
-        self.application_supervisor.execute(app_id).await
+        self.application_lifecycle_manager.start(app_id).await
+    }
+
+    pub async fn start_application(
+        &self,
+        app_id: &ApplicationId,
+    ) -> Result<ExecutionReport, ApplicationError> {
+        self.application_lifecycle_manager.start(app_id).await
+    }
+
+    pub async fn stop_application(&self, app_id: &ApplicationId) -> Result<(), ApplicationError> {
+        self.application_lifecycle_manager.stop(app_id).await
+    }
+
+    pub async fn restart_application(
+        &self,
+        app_id: &ApplicationId,
+    ) -> Result<ExecutionReport, ApplicationError> {
+        self.application_lifecycle_manager.restart(app_id).await
+    }
+
+    pub async fn update_application(
+        &self,
+        package: &ApplicationPackage,
+        item_payloads: &HashMap<String, Vec<u8>>,
+    ) -> Result<ApplicationRecord, ApplicationError> {
+        self.application_lifecycle_manager
+            .update(package, item_payloads)
+            .await
+    }
+
+    pub async fn isolate_application(
+        &self,
+        app_id: &ApplicationId,
+        reason: &str,
+    ) -> Result<(), ApplicationError> {
+        self.application_lifecycle_manager
+            .isolate(app_id, reason)
+            .await
+    }
+
+    pub async fn unisolate_application(
+        &self,
+        app_id: &ApplicationId,
+    ) -> Result<ApplicationState, ApplicationError> {
+        self.application_lifecycle_manager.unisolate(app_id).await
+    }
+
+    pub async fn uninstall_application(
+        &self,
+        app_id: &ApplicationId,
+    ) -> Result<(), ApplicationError> {
+        self.application_lifecycle_manager.uninstall(app_id).await
+    }
+
+    pub async fn resolve_application_dependencies(
+        &self,
+        app_id: &ApplicationId,
+    ) -> Result<DependencyResolutionReport, ApplicationError> {
+        self.application_lifecycle_manager
+            .resolve_dependencies(app_id)
+            .await
     }
 
     pub async fn stop_application_execution(
@@ -797,8 +910,7 @@ impl FieldnetRuntime {
         &self,
         app_id: &ApplicationId,
     ) -> Result<ApplicationState, ApplicationError> {
-        self.application_registry
-            .update_lifecycle_state(app_id, ApplicationState::Authorized)
+        self.application_lifecycle_manager.authorize(app_id)
     }
 
     pub async fn run_application_with_id(

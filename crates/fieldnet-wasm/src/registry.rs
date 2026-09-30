@@ -8,8 +8,8 @@ use tracing::{debug, info};
 
 use crate::dependencies::AppDependency;
 use crate::error::ApplicationError;
-use crate::id::{AppVersion, ApplicationId, PackageId, PublisherIdentity};
-use crate::lifecycle::ApplicationState;
+use crate::id::{AppVersion, ApplicationId, ExecutionId, PackageId, PublisherIdentity};
+use crate::lifecycle::{ApplicationState, UpdateTransactionState};
 use crate::limits::ResourceLimits;
 use crate::manifest::ApplicationManifest;
 use crate::package::PackageItem;
@@ -79,6 +79,36 @@ pub struct ApplicationHistoryRecord {
     pub manifest: ApplicationManifest,
     pub items: Vec<PackageItem>,
     pub recorded_at: Timestamp,
+}
+
+/// Persistent record tracking an in-flight or completed application package update transaction.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct UpdateTransactionRecord {
+    pub update_id: String,
+    pub application_id: ApplicationId,
+    pub target_version: AppVersion,
+    pub target_package_id: PackageId,
+    pub target_package_hash: ContentId,
+    pub target_manifest: ApplicationManifest,
+    pub target_items: Vec<PackageItem>,
+    pub previous_version: AppVersion,
+    pub previous_package_id: PackageId,
+    pub previous_package_hash: ContentId,
+    pub state: UpdateTransactionState,
+    pub error_message: Option<String>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+/// Persistent record tracking an unexpected crash or fault of an application execution instance.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct CrashRecord {
+    pub id: i64,
+    pub application_id: ApplicationId,
+    pub execution_id: ExecutionId,
+    pub version: AppVersion,
+    pub reason: String,
+    pub crashed_at: Timestamp,
 }
 
 /// Persistent, restart-resilient registry storing application state, manifests, and rollback history.
@@ -154,6 +184,47 @@ impl ApplicationRegistry {
 
             CREATE INDEX IF NOT EXISTS idx_storage_usage_app_id
                 ON application_storage_usage(application_id);
+
+            CREATE TABLE IF NOT EXISTS application_updates (
+                update_id TEXT PRIMARY KEY,
+                application_id TEXT NOT NULL,
+                target_version TEXT NOT NULL,
+                target_package_id TEXT NOT NULL,
+                target_package_hash TEXT NOT NULL,
+                target_manifest_json TEXT NOT NULL,
+                target_items_json TEXT NOT NULL DEFAULT '[]',
+                previous_version TEXT NOT NULL,
+                previous_package_id TEXT NOT NULL,
+                previous_package_hash TEXT NOT NULL,
+                state TEXT NOT NULL,
+                error_message TEXT,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                FOREIGN KEY (application_id) REFERENCES applications(application_id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_app_updates_app_id
+                ON application_updates(application_id, created_at_ms DESC);
+
+            CREATE TABLE IF NOT EXISTS application_crashes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                application_id TEXT NOT NULL,
+                execution_id TEXT NOT NULL,
+                version TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                crashed_at_ms INTEGER NOT NULL,
+                FOREIGN KEY (application_id) REFERENCES applications(application_id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_app_crashes_app_id
+                ON application_crashes(application_id, crashed_at_ms DESC);
+
+            CREATE TABLE IF NOT EXISTS application_isolation (
+                application_id TEXT PRIMARY KEY,
+                reason TEXT NOT NULL,
+                isolated_at_ms INTEGER NOT NULL,
+                FOREIGN KEY (application_id) REFERENCES applications(application_id) ON DELETE CASCADE
+            );
             "#,
         )?;
 
@@ -516,41 +587,78 @@ impl ApplicationRegistry {
 
     /// Rollback the application to its immediately preceding valid package version.
     pub fn rollback(&self, app_id: &ApplicationId) -> Result<ApplicationRecord, ApplicationError> {
+        self.rollback_to_version(app_id, None)
+    }
+
+    /// Rollback the application to a specific historical version, or the most recent if None.
+    pub fn rollback_to_version(
+        &self,
+        app_id: &ApplicationId,
+        target_version: Option<&AppVersion>,
+    ) -> Result<ApplicationRecord, ApplicationError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
 
-        // 1. Fetch latest history record
-        let hist_row: Option<(i64, String, String, String, String, String)> = tx
-            .query_row(
-                r#"
-                SELECT id, version, package_id, package_hash, manifest_json, items_json
-                FROM application_history
-                WHERE application_id = ?1
-                ORDER BY recorded_at_ms DESC, id DESC
-                LIMIT 1
-                "#,
-                params![app_id.to_string()],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                    ))
-                },
-            )
-            .optional()?;
+        // 1. Fetch history record (either target version or latest)
+        let hist_row: Option<(i64, String, String, String, String, String)> = match target_version {
+            Some(ver) => tx
+                .query_row(
+                    r#"
+                    SELECT id, version, package_id, package_hash, manifest_json, items_json
+                    FROM application_history
+                    WHERE application_id = ?1 AND version = ?2
+                    LIMIT 1
+                    "#,
+                    params![app_id.to_string(), ver.to_string()],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                        ))
+                    },
+                )
+                .optional()?,
+            None => tx
+                .query_row(
+                    r#"
+                    SELECT id, version, package_id, package_hash, manifest_json, items_json
+                    FROM application_history
+                    WHERE application_id = ?1
+                    ORDER BY recorded_at_ms DESC, id DESC
+                    LIMIT 1
+                    "#,
+                    params![app_id.to_string()],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                        ))
+                    },
+                )
+                .optional()?,
+        };
 
         let (hist_id, hist_ver, hist_pkg_id, hist_pkg_hash, hist_manifest_json, hist_items_json) =
             match hist_row {
                 Some(h) => h,
                 None => {
-                    return Err(ApplicationError::RollbackError(format!(
-                        "No previous versions recorded for application '{}'",
-                        app_id
-                    )))
+                    return Err(ApplicationError::RollbackError(match target_version {
+                        Some(ver) => format!(
+                            "Version '{}' not found in history for application '{}'",
+                            ver, app_id
+                        ),
+                        None => {
+                            format!("No previous versions recorded for application '{}'", app_id)
+                        }
+                    }))
                 }
             };
 
@@ -633,6 +741,61 @@ impl ApplicationRegistry {
         };
 
         Ok(restored_record)
+    }
+
+    /// Fetches a specific historical version recorded for an application.
+    pub fn get_history_version(
+        &self,
+        app_id: &ApplicationId,
+        version: &AppVersion,
+    ) -> Result<Option<ApplicationHistoryRecord>, ApplicationError> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                r#"
+                SELECT id, application_id, version, package_id, package_hash, manifest_json, items_json, recorded_at_ms
+                FROM application_history
+                WHERE application_id = ?1 AND version = ?2
+                LIMIT 1
+                "#,
+                params![app_id.to_string(), version.to_string()],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, String>(5)?,
+                        r.get::<_, String>(6)?,
+                        r.get::<_, u64>(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        match row {
+            Some((
+                id,
+                app_id_str,
+                ver_str,
+                pkg_id_str,
+                pkg_hash_str,
+                manifest_json,
+                items_json,
+                recorded_at_ms,
+            )) => Ok(Some(ApplicationHistoryRecord {
+                id,
+                application_id: app_id_str.parse()?,
+                version: ver_str.parse()?,
+                package_id: pkg_id_str.parse()?,
+                package_hash: ContentId::from_hex(&pkg_hash_str)?,
+                manifest: serde_json::from_str(&manifest_json)?,
+                items: serde_json::from_str(&items_json).unwrap_or_default(),
+                recorded_at: Timestamp::from_millis(recorded_at_ms),
+            })),
+            None => Ok(None),
+        }
     }
 
     /// Fetches all historical versions recorded for an application.
@@ -764,6 +927,26 @@ impl ApplicationRegistry {
             params![app_id.to_string()],
         )?;
 
+        tx.execute(
+            "DELETE FROM application_storage_usage WHERE application_id = ?1",
+            params![app_id.to_string()],
+        )?;
+
+        tx.execute(
+            "DELETE FROM application_updates WHERE application_id = ?1",
+            params![app_id.to_string()],
+        )?;
+
+        tx.execute(
+            "DELETE FROM application_crashes WHERE application_id = ?1",
+            params![app_id.to_string()],
+        )?;
+
+        tx.execute(
+            "DELETE FROM application_isolation WHERE application_id = ?1",
+            params![app_id.to_string()],
+        )?;
+
         let count = tx.execute(
             "DELETE FROM applications WHERE application_id = ?1",
             params![app_id.to_string()],
@@ -848,5 +1031,400 @@ impl ApplicationRegistry {
             )
             .optional()?;
         Ok(exists.is_some())
+    }
+
+    /// Creates a persistent record tracking an in-flight update transaction.
+    pub fn create_update_transaction(
+        &self,
+        record: &UpdateTransactionRecord,
+    ) -> Result<(), ApplicationError> {
+        let conn = self.conn.lock().unwrap();
+        let manifest_json = serde_json::to_string(&record.target_manifest)?;
+        let items_json = serde_json::to_string(&record.target_items)?;
+
+        conn.execute(
+            r#"
+            INSERT INTO application_updates (
+                update_id,
+                application_id,
+                target_version,
+                target_package_id,
+                target_package_hash,
+                target_manifest_json,
+                target_items_json,
+                previous_version,
+                previous_package_id,
+                previous_package_hash,
+                state,
+                error_message,
+                created_at_ms,
+                updated_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            "#,
+            params![
+                record.update_id,
+                record.application_id.to_string(),
+                record.target_version.to_string(),
+                record.target_package_id.to_string(),
+                record.target_package_hash.to_hex(),
+                manifest_json,
+                items_json,
+                record.previous_version.to_string(),
+                record.previous_package_id.to_string(),
+                record.previous_package_hash.to_hex(),
+                record.state.as_str(),
+                record.error_message,
+                record.created_at.as_millis(),
+                record.updated_at.as_millis(),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    /// Updates the state of an existing update transaction.
+    pub fn set_update_transaction_state(
+        &self,
+        update_id: &str,
+        state: UpdateTransactionState,
+        error_msg: Option<String>,
+    ) -> Result<(), ApplicationError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            UPDATE application_updates SET
+                state = ?1,
+                error_message = ?2,
+                updated_at_ms = ?3
+            WHERE update_id = ?4
+            "#,
+            params![
+                state.as_str(),
+                error_msg,
+                Timestamp::now().as_millis(),
+                update_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Fetches the currently active / in-flight update transaction for an application, if any.
+    pub fn get_active_update_transaction(
+        &self,
+        app_id: &ApplicationId,
+    ) -> Result<Option<UpdateTransactionRecord>, ApplicationError> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                r#"
+                SELECT
+                    update_id,
+                    application_id,
+                    target_version,
+                    target_package_id,
+                    target_package_hash,
+                    target_manifest_json,
+                    target_items_json,
+                    previous_version,
+                    previous_package_id,
+                    previous_package_hash,
+                    state,
+                    error_message,
+                    created_at_ms,
+                    updated_at_ms
+                FROM application_updates
+                WHERE application_id = ?1 AND state IN ('PREPARING', 'VERIFIED', 'STAGED', 'ACTIVATING')
+                ORDER BY created_at_ms DESC
+                LIMIT 1
+                "#,
+                params![app_id.to_string()],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, String>(5)?,
+                        r.get::<_, String>(6)?,
+                        r.get::<_, String>(7)?,
+                        r.get::<_, String>(8)?,
+                        r.get::<_, String>(9)?,
+                        r.get::<_, String>(10)?,
+                        r.get::<_, Option<String>>(11)?,
+                        r.get::<_, u64>(12)?,
+                        r.get::<_, u64>(13)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        match row {
+            Some((
+                uid,
+                app_str,
+                t_ver_str,
+                t_pkg_id_str,
+                t_pkg_hash_str,
+                manifest_json,
+                items_json,
+                p_ver_str,
+                p_pkg_id_str,
+                p_pkg_hash_str,
+                state_str,
+                err_msg,
+                created_ms,
+                updated_ms,
+            )) => Ok(Some(UpdateTransactionRecord {
+                update_id: uid,
+                application_id: app_str.parse()?,
+                target_version: t_ver_str.parse()?,
+                target_package_id: t_pkg_id_str.parse()?,
+                target_package_hash: ContentId::from_hex(&t_pkg_hash_str)?,
+                target_manifest: serde_json::from_str(&manifest_json)?,
+                target_items: serde_json::from_str(&items_json).unwrap_or_default(),
+                previous_version: p_ver_str.parse()?,
+                previous_package_id: p_pkg_id_str.parse()?,
+                previous_package_hash: ContentId::from_hex(&p_pkg_hash_str)?,
+                state: state_str.parse()?,
+                error_message: err_msg,
+                created_at: Timestamp::from_millis(created_ms),
+                updated_at: Timestamp::from_millis(updated_ms),
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// Lists all incomplete / in-flight update transactions across all applications.
+    pub fn list_incomplete_update_transactions(
+        &self,
+    ) -> Result<Vec<UpdateTransactionRecord>, ApplicationError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT
+                update_id,
+                application_id,
+                target_version,
+                target_package_id,
+                target_package_hash,
+                target_manifest_json,
+                target_items_json,
+                previous_version,
+                previous_package_id,
+                previous_package_hash,
+                state,
+                error_message,
+                created_at_ms,
+                updated_at_ms
+            FROM application_updates
+            WHERE state IN ('PREPARING', 'VERIFIED', 'STAGED', 'ACTIVATING')
+            ORDER BY created_at_ms ASC
+            "#,
+        )?;
+
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+                r.get::<_, String>(7)?,
+                r.get::<_, String>(8)?,
+                r.get::<_, String>(9)?,
+                r.get::<_, String>(10)?,
+                r.get::<_, Option<String>>(11)?,
+                r.get::<_, u64>(12)?,
+                r.get::<_, u64>(13)?,
+            ))
+        })?;
+
+        let mut out = Vec::new();
+        for r in rows {
+            let (
+                uid,
+                app_str,
+                t_ver_str,
+                t_pkg_id_str,
+                t_pkg_hash_str,
+                manifest_json,
+                items_json,
+                p_ver_str,
+                p_pkg_id_str,
+                p_pkg_hash_str,
+                state_str,
+                err_msg,
+                created_ms,
+                updated_ms,
+            ) = r?;
+
+            out.push(UpdateTransactionRecord {
+                update_id: uid,
+                application_id: app_str.parse()?,
+                target_version: t_ver_str.parse()?,
+                target_package_id: t_pkg_id_str.parse()?,
+                target_package_hash: ContentId::from_hex(&t_pkg_hash_str)?,
+                target_manifest: serde_json::from_str(&manifest_json)?,
+                target_items: serde_json::from_str(&items_json).unwrap_or_default(),
+                previous_version: p_ver_str.parse()?,
+                previous_package_id: p_pkg_id_str.parse()?,
+                previous_package_hash: ContentId::from_hex(&p_pkg_hash_str)?,
+                state: state_str.parse()?,
+                error_message: err_msg,
+                created_at: Timestamp::from_millis(created_ms),
+                updated_at: Timestamp::from_millis(updated_ms),
+            });
+        }
+
+        Ok(out)
+    }
+
+    /// Records an execution crash into persistent crash history.
+    pub fn record_crash(
+        &self,
+        app_id: &ApplicationId,
+        execution_id: &ExecutionId,
+        version: &AppVersion,
+        reason: &str,
+    ) -> Result<(), ApplicationError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO application_crashes (
+                application_id,
+                execution_id,
+                version,
+                reason,
+                crashed_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![
+                app_id.to_string(),
+                execution_id.to_string(),
+                version.to_string(),
+                reason,
+                Timestamp::now().as_millis(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Fetches all recorded crashes for an application.
+    pub fn get_crash_history(
+        &self,
+        app_id: &ApplicationId,
+    ) -> Result<Vec<CrashRecord>, ApplicationError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT id, application_id, execution_id, version, reason, crashed_at_ms
+            FROM application_crashes
+            WHERE application_id = ?1
+            ORDER BY crashed_at_ms DESC, id DESC
+            "#,
+        )?;
+
+        let rows = stmt.query_map(params![app_id.to_string()], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, u64>(5)?,
+            ))
+        })?;
+
+        let mut out = Vec::new();
+        for r in rows {
+            let (id, app_str, exec_str, ver_str, reason, crashed_ms) = r?;
+            out.push(CrashRecord {
+                id,
+                application_id: app_str.parse()?,
+                execution_id: exec_str.parse()?,
+                version: ver_str.parse()?,
+                reason,
+                crashed_at: Timestamp::from_millis(crashed_ms),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Records that an application has been placed into administrative or security ISOLATION.
+    pub fn record_isolation(
+        &self,
+        app_id: &ApplicationId,
+        reason: &str,
+    ) -> Result<(), ApplicationError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO application_isolation (
+                application_id,
+                reason,
+                isolated_at_ms
+            ) VALUES (?1, ?2, ?3)
+            ON CONFLICT(application_id) DO UPDATE SET
+                reason = excluded.reason,
+                isolated_at_ms = excluded.isolated_at_ms
+            "#,
+            params![app_id.to_string(), reason, Timestamp::now().as_millis(),],
+        )?;
+        Ok(())
+    }
+
+    /// Gets the isolation reason for an application, if isolated.
+    pub fn get_isolation_reason(
+        &self,
+        app_id: &ApplicationId,
+    ) -> Result<Option<String>, ApplicationError> {
+        let conn = self.conn.lock().unwrap();
+        let reason = conn
+            .query_row(
+                "SELECT reason FROM application_isolation WHERE application_id = ?1",
+                params![app_id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(reason)
+    }
+
+    /// Clears the isolation record for an application upon administrative unquarantine.
+    pub fn clear_isolation(&self, app_id: &ApplicationId) -> Result<bool, ApplicationError> {
+        let conn = self.conn.lock().unwrap();
+        let count = conn.execute(
+            "DELETE FROM application_isolation WHERE application_id = ?1",
+            params![app_id.to_string()],
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Evaluates whether an application is currently under isolation.
+    pub fn is_isolated(&self, app_id: &ApplicationId) -> Result<bool, ApplicationError> {
+        let conn = self.conn.lock().unwrap();
+        let in_isolation_table: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM application_isolation WHERE application_id = ?1",
+                params![app_id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        if in_isolation_table.is_some() {
+            return Ok(true);
+        }
+
+        let state_str: Option<String> = conn
+            .query_row(
+                "SELECT lifecycle_state FROM applications WHERE application_id = ?1",
+                params![app_id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        Ok(state_str.as_deref() == Some("ISOLATED"))
     }
 }

@@ -324,41 +324,22 @@ impl FromStr for AppVersion {
         };
 
         let parts: Vec<&str> = core.split('.').collect();
-        let (major, minor, patch) = match parts.len() {
-            1 => {
-                let major = parts[0].parse::<u64>().map_err(|e| {
-                    ApplicationError::InvalidVersion(format!("Invalid major version: {}", e))
-                })?;
-                (major, 0, 0)
-            }
-            2 => {
-                let major = parts[0].parse::<u64>().map_err(|e| {
-                    ApplicationError::InvalidVersion(format!("Invalid major version: {}", e))
-                })?;
-                let minor = parts[1].parse::<u64>().map_err(|e| {
-                    ApplicationError::InvalidVersion(format!("Invalid minor version: {}", e))
-                })?;
-                (major, minor, 0)
-            }
-            3 => {
-                let major = parts[0].parse::<u64>().map_err(|e| {
-                    ApplicationError::InvalidVersion(format!("Invalid major version: {}", e))
-                })?;
-                let minor = parts[1].parse::<u64>().map_err(|e| {
-                    ApplicationError::InvalidVersion(format!("Invalid minor version: {}", e))
-                })?;
-                let patch = parts[2].parse::<u64>().map_err(|e| {
-                    ApplicationError::InvalidVersion(format!("Invalid patch version: {}", e))
-                })?;
-                (major, minor, patch)
-            }
-            _ => {
-                return Err(ApplicationError::InvalidVersion(format!(
-                    "Version must contain 1 to 3 numeric parts, got '{}'",
-                    s
-                )));
-            }
-        };
+        if parts.len() != 3 {
+            return Err(ApplicationError::InvalidVersion(format!(
+                "Version must contain major.minor.patch, got '{}'",
+                s
+            )));
+        }
+
+        let major = parts[0].parse::<u64>().map_err(|e| {
+            ApplicationError::InvalidVersion(format!("Invalid major version: {}", e))
+        })?;
+        let minor = parts[1].parse::<u64>().map_err(|e| {
+            ApplicationError::InvalidVersion(format!("Invalid minor version: {}", e))
+        })?;
+        let patch = parts[2].parse::<u64>().map_err(|e| {
+            ApplicationError::InvalidVersion(format!("Invalid patch version: {}", e))
+        })?;
 
         Ok(Self {
             major,
@@ -441,19 +422,33 @@ impl AppVersionReq {
                         && (ver.minor > target.minor
                             || (ver.minor == target.minor && ver.patch >= target.patch))
                 } else if target.minor > 0 {
-                    ver.major == 0
-                        && ver.minor == target.minor
-                        && ver.patch >= target.patch
+                    ver.major == 0 && ver.minor == target.minor && ver.patch >= target.patch
                 } else {
                     ver.major == 0 && ver.minor == 0 && ver.patch == target.patch
                 }
             }
             Self::Tilde(target) => {
-                ver.major == target.major
-                    && ver.minor == target.minor
-                    && ver.patch >= target.patch
+                ver.major == target.major && ver.minor == target.minor && ver.patch >= target.patch
             }
         }
+    }
+}
+
+fn normalize_version_spec(s: &str) -> String {
+    let clean = s.trim();
+    let (core, pre) = match clean.split_once('-') {
+        Some((c, p)) => (c, Some(p)),
+        None => (clean, None),
+    };
+    let parts: Vec<&str> = core.split('.').collect();
+    let norm_core = match parts.len() {
+        1 => format!("{}.0.0", core),
+        2 => format!("{}.0", core),
+        _ => core.to_string(),
+    };
+    match pre {
+        Some(p) => format!("{}-{}", norm_core, p),
+        None => norm_core,
     }
 }
 
@@ -467,26 +462,26 @@ impl FromStr for AppVersionReq {
         }
 
         if let Some(stripped) = clean.strip_prefix(">=") {
-            let ver = AppVersion::from_str(stripped.trim())?;
+            let ver = AppVersion::from_str(&normalize_version_spec(stripped.trim()))?;
             return Ok(Self::AtLeast(ver));
         }
 
         if let Some(stripped) = clean.strip_prefix('^') {
-            let ver = AppVersion::from_str(stripped.trim())?;
+            let ver = AppVersion::from_str(&normalize_version_spec(stripped.trim()))?;
             return Ok(Self::Compatible(ver));
         }
 
         if let Some(stripped) = clean.strip_prefix('~') {
-            let ver = AppVersion::from_str(stripped.trim())?;
+            let ver = AppVersion::from_str(&normalize_version_spec(stripped.trim()))?;
             return Ok(Self::Tilde(ver));
         }
 
         if let Some(stripped) = clean.strip_prefix('=') {
-            let ver = AppVersion::from_str(stripped.trim())?;
+            let ver = AppVersion::from_str(&normalize_version_spec(stripped.trim()))?;
             return Ok(Self::Exact(ver));
         }
 
-        let ver = AppVersion::from_str(clean)?;
+        let ver = AppVersion::from_str(&normalize_version_spec(clean))?;
         Ok(Self::Exact(ver))
     }
 }

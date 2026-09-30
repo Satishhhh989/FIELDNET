@@ -66,9 +66,17 @@ impl ApplicationState {
             Self::Verified => matches!(target, Self::Installed | Self::Isolated),
             Self::Installed => matches!(target, Self::Authorized | Self::Isolated),
             Self::Authorized => {
-                matches!(target, Self::Starting | Self::Installed | Self::Isolated)
+                matches!(
+                    target,
+                    Self::Starting | Self::Installed | Self::Stopped | Self::Isolated
+                )
             }
-            Self::Starting => matches!(target, Self::Running | Self::Crashed | Self::Isolated),
+            Self::Starting => {
+                matches!(
+                    target,
+                    Self::Running | Self::Crashed | Self::Isolated | Self::Stopped
+                )
+            }
             Self::Running => matches!(
                 target,
                 Self::Suspended | Self::Stopped | Self::Crashed | Self::Isolated
@@ -118,6 +126,66 @@ impl FromStr for ApplicationState {
             "ISOLATED" => Ok(Self::Isolated),
             other => Err(ApplicationError::InvalidManifest(format!(
                 "Unknown application state: '{}'",
+                other
+            ))),
+        }
+    }
+}
+
+/// Explicit transactional states for application package updates.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum UpdateTransactionState {
+    /// Update initiated, package metadata received.
+    Preparing,
+    /// Package integrity and publisher signature verified.
+    Verified,
+    /// New package items staged into CAS, dependencies satisfied.
+    Staged,
+    /// Old version execution stopping, registry updating to target version.
+    Activating,
+    /// Update activated and running or verified healthy.
+    Active,
+    /// Update failed during staging, activation, or startup.
+    Failed,
+    /// Update failed and previous version restored.
+    RolledBack,
+}
+
+impl UpdateTransactionState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Preparing => "PREPARING",
+            Self::Verified => "VERIFIED",
+            Self::Staged => "STAGED",
+            Self::Activating => "ACTIVATING",
+            Self::Active => "ACTIVE",
+            Self::Failed => "FAILED",
+            Self::RolledBack => "ROLLED_BACK",
+        }
+    }
+}
+
+impl fmt::Display for UpdateTransactionState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl FromStr for UpdateTransactionState {
+    type Err = ApplicationError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "PREPARING" => Ok(Self::Preparing),
+            "VERIFIED" => Ok(Self::Verified),
+            "STAGED" => Ok(Self::Staged),
+            "ACTIVATING" => Ok(Self::Activating),
+            "ACTIVE" => Ok(Self::Active),
+            "FAILED" => Ok(Self::Failed),
+            "ROLLED_BACK" => Ok(Self::RolledBack),
+            other => Err(ApplicationError::InvalidManifest(format!(
+                "Unknown update transaction state: '{}'",
                 other
             ))),
         }
