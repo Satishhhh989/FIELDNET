@@ -26,10 +26,10 @@ FIELDNET solves this failure mode by operating entirely local-first. Devices run
 - **A sandboxed execution platform**: Distributes and runs signed WebAssembly modules (`.fnapp`) with capability-based security, memory boundaries, and instruction fuel limits.
 
 ### What FIELDNET Is NOT:
-- ❌ **Not an OS replacement**: It does not replace the Linux kernel, macOS Darwin, Android, or Windows; it executes on top of the host OS as an application runtime.
-- ❌ **Not merely a chat app**: While it includes robust messaging, chat is simply one trivial consumer service on top of the runtime.
-- ❌ **Not merely a mesh router**: It does not stop at packet forwarding; it provides structured databases, content-addressed storage, service discovery, and compute execution.
-- ❌ **Not a cloud surrogate**: It has no concept of master nodes, primary coordinates, or central authorities.
+-  **Not an OS replacement**: It does not replace the Linux kernel, macOS Darwin, Android, or Windows; it executes on top of the host OS as an application runtime.
+-  **Not merely a chat app**: While it includes robust messaging, chat is simply one trivial consumer service on top of the runtime.
+-  **Not merely a mesh router**: It does not stop at packet forwarding; it provides structured databases, content-addressed storage, service discovery, and compute execution.
+-  **Not a cloud surrogate**: It has no concept of master nodes, primary coordinates, or central authorities.
 
 ---
 
