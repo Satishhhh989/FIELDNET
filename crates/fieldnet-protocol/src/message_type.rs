@@ -11,6 +11,7 @@ pub enum MessageType {
     Sync = 6,
     File = 7,
     Service = 8,
+    AppPackage = 9,
 }
 
 impl MessageType {
@@ -24,6 +25,7 @@ impl MessageType {
             Self::Sync => true,
             Self::File => true,
             Self::Service => true,
+            Self::AppPackage => true,
         }
     }
 }

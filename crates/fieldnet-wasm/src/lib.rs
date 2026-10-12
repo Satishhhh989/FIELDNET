@@ -6,6 +6,7 @@
 
 pub mod cas;
 pub mod dependencies;
+pub mod distributed;
 pub mod error;
 pub mod events;
 pub mod execution;
@@ -25,6 +26,13 @@ pub use cas::CasPackageStorage;
 pub use dependencies::{
     AppDependency, DependencyGraph, DependencyResolutionReport, DependencyResolver, DependencyType,
     ResolvedDependency,
+};
+pub use distributed::{
+    ApplicationPackageDiscovery, ApplicationPackageMessage, DiscoveredPackageRecord,
+    GlobalSharingMode, PackageAdvertisement, PackageBundle, PackageCatalog, PackageCatalogState,
+    PackageChunkRequest, PackageDistributionManager, PackageNetworkSender, PackageRequest,
+    PackageResponse, PackageSharingPolicy, PackageStorageDb, PackageTransferChunk,
+    PackageTransferSession, PublisherTrustPolicy, TransferLimits, TransferStatus,
 };
 pub use error::ApplicationError;
 pub use events::ApplicationEvent;

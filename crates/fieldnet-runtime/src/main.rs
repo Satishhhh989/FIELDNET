@@ -111,6 +111,11 @@ enum AppCommand {
         /// ApplicationId to inspect
         application: String,
     },
+    /// Transactionally update an installed application package
+    Update {
+        /// Path to the new application package JSON file
+        package: PathBuf,
+    },
     /// Roll back an application to a previous version
     Rollback {
         /// ApplicationId to roll back
@@ -647,6 +652,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 }
                 Err(e) => {
                     println!("Invalid ApplicationId '{}': {}", application, e);
+                }
+            },
+            AppCommand::Update { package } => match std::fs::read_to_string(&package) {
+                Ok(content) => match serde_json::from_str::<ApplicationPackage>(&content) {
+                    Ok(pkg) => {
+                        println!("UPDATING APPLICATION: {}", pkg.manifest.application_id);
+                        println!("{}", "=".repeat(60));
+                        let mut payloads = std::collections::HashMap::new();
+                        let base_dir = package
+                            .parent()
+                            .unwrap_or_else(|| std::path::Path::new("."));
+                        for item in &pkg.items {
+                            let item_path = base_dir.join(&item.path);
+                            if let Ok(bytes) = std::fs::read(&item_path) {
+                                payloads.insert(item.path.clone(), bytes);
+                            }
+                        }
+                        match runtime.update_application(&pkg, &payloads).await {
+                            Ok(rec) => {
+                                println!("Updated To:       Version {}", rec.installed_version);
+                                println!("Package ID:       {}", rec.package_id);
+                                println!("Package Hash:     {}", rec.package_hash);
+                                println!("State:            {:?}", rec.lifecycle_state);
+                                println!("RESULT:           UPDATE SUCCESS");
+                            }
+                            Err(e) => {
+                                println!("Update Failed:    {}", e);
+                                println!("RESULT:           UPDATE FAILED");
+                            }
+                        }
+                        println!("{}", "=".repeat(60));
+                    }
+                    Err(e) => {
+                        println!("Failed to parse application package JSON: {}", e);
+                    }
+                },
+                Err(e) => {
+                    println!("Failed to read package file '{:?}': {}", package, e);
                 }
             },
             AppCommand::Rollback {

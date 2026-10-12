@@ -10,6 +10,7 @@ members = [
     "crates/fieldnet-service",
     "crates/fieldnet-wasm",
     "crates/fieldnet-runtime",
+    "apps/fieldnet-desktop/src-tauri",
 ]
 
 [workspace.dependencies]

@@ -227,6 +227,30 @@ impl DiscoveryService {
         Ok(())
     }
 
+    pub async fn broadcast_beacon_now(&self) -> Result<(), NetworkError> {
+        let beacon = DiscoveryBeacon::new(
+            self.local_node_id,
+            self.tcp_port,
+            self.config.beacon_ttl_secs,
+        );
+        let bytes = serde_json::to_vec(&beacon)?;
+        let multicast_target: SocketAddr =
+            format!("{}:{}", MULTICAST_GROUP, self.config.discovery_port)
+                .parse()
+                .unwrap();
+        let localhost_target: SocketAddr = format!("127.0.0.1:{}", self.config.discovery_port)
+            .parse()
+            .unwrap();
+        let broadcast_target: SocketAddr =
+            format!("255.255.255.255:{}", self.config.discovery_port)
+                .parse()
+                .unwrap();
+        let _ = self.socket.send_to(&bytes, multicast_target).await;
+        let _ = self.socket.send_to(&bytes, localhost_target).await;
+        let _ = self.socket.send_to(&bytes, broadcast_target).await;
+        Ok(())
+    }
+
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(());
     }

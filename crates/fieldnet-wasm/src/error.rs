@@ -100,6 +100,18 @@ pub enum ApplicationError {
 
     #[error("Execution instance '{0}' not found")]
     ExecutionNotFound(String),
+
+    #[error("Validation error: {0}")]
+    ValidationError(String),
+
+    #[error("Security policy violation: {0}")]
+    SecurityError(String),
+
+    #[error("Quota exceeded: {0}")]
+    QuotaExceeded(String),
+
+    #[error("Package transfer error: {0}")]
+    TransferError(String),
 }
 
 impl From<rusqlite::Error> for ApplicationError {

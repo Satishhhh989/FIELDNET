@@ -211,4 +211,10 @@ impl LocalWebGateway {
 
         Ok(())
     }
+
+    /// Accessor for the active bound SocketAddr, if running.
+    pub async fn bound_addr(&self) -> Option<SocketAddr> {
+        let guard = self.bound_addr.read().await;
+        *guard
+    }
 }

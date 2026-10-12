@@ -463,6 +463,10 @@ impl FieldnetRuntime {
         Arc::clone(&self.connection_manager)
     }
 
+    pub fn discovery(&self) -> Arc<DiscoveryService> {
+        Arc::clone(&self.discovery)
+    }
+
     pub fn routing_table(&self) -> Arc<RoutingTable> {
         Arc::clone(&self.routing_table)
     }
@@ -2657,6 +2661,13 @@ impl FieldnetRuntime {
                         );
                     }
                 }
+            }
+            MessageType::AppPackage => {
+                debug!(
+                    "AppPackage message received from {} (payload len: {} bytes)",
+                    message.source,
+                    message.payload.len()
+                );
             }
         }
     }

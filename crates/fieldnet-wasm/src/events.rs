@@ -1,4 +1,5 @@
 use fieldnet_content::identity::ContentId;
+use fieldnet_core::NodeId;
 use serde::{Deserialize, Serialize};
 
 use crate::id::{ApplicationId, ExecutionId, PackageId, PublisherIdentity};
@@ -13,6 +14,99 @@ pub enum ApplicationEvent {
         application_id: ApplicationId,
         package_id: PackageId,
         publisher: PublisherIdentity,
+    },
+
+    /// A package advertisement was discovered from a network peer.
+    PackageDiscovered {
+        application_id: ApplicationId,
+        package_id: PackageId,
+        version: String,
+        package_hash: ContentId,
+        provider_node: NodeId,
+    },
+
+    /// A package transfer request was sent to a peer.
+    PackageRequested {
+        application_id: ApplicationId,
+        version: String,
+        package_hash: ContentId,
+        transfer_id: String,
+        peer_node: NodeId,
+    },
+
+    /// A package chunked transfer has started.
+    PackageTransferStarted {
+        application_id: ApplicationId,
+        transfer_id: String,
+        package_hash: ContentId,
+        total_chunks: u32,
+        total_bytes: u64,
+    },
+
+    /// A package chunk was received and verified.
+    PackageChunkReceived {
+        application_id: ApplicationId,
+        transfer_id: String,
+        chunk_index: u32,
+        total_chunks: u32,
+    },
+
+    /// A package transfer was paused.
+    PackageTransferPaused {
+        application_id: ApplicationId,
+        transfer_id: String,
+        reason: String,
+    },
+
+    /// A package transfer was resumed.
+    PackageTransferResumed {
+        application_id: ApplicationId,
+        transfer_id: String,
+    },
+
+    /// All package chunks were received.
+    PackageTransferCompleted {
+        application_id: ApplicationId,
+        transfer_id: String,
+        package_hash: ContentId,
+        total_bytes: u64,
+    },
+
+    /// Package verification started.
+    PackageVerificationStarted {
+        application_id: ApplicationId,
+        transfer_id: String,
+        package_hash: ContentId,
+    },
+
+    /// Package verification succeeded.
+    PackageVerified {
+        application_id: ApplicationId,
+        package_id: PackageId,
+        package_hash: ContentId,
+    },
+
+    /// Package verification failed.
+    PackageVerificationFailed {
+        application_id: ApplicationId,
+        transfer_id: String,
+        package_hash: ContentId,
+        reason: String,
+    },
+
+    /// Package is verified, trusted, and installable.
+    PackageInstallable {
+        application_id: ApplicationId,
+        version: String,
+        package_hash: ContentId,
+    },
+
+    /// Package transfer failed.
+    PackageTransferFailed {
+        application_id: ApplicationId,
+        transfer_id: String,
+        package_hash: ContentId,
+        reason: String,
     },
 
     /// An application package's content integrity and publisher signature were verified.
@@ -173,6 +267,18 @@ impl ApplicationEvent {
     pub fn topic(&self) -> &str {
         match self {
             Self::Discovered { .. } => "application.discovered",
+            Self::PackageDiscovered { .. } => "application.package.discovered",
+            Self::PackageRequested { .. } => "application.package.requested",
+            Self::PackageTransferStarted { .. } => "application.package.transfer_started",
+            Self::PackageChunkReceived { .. } => "application.package.chunk_received",
+            Self::PackageTransferPaused { .. } => "application.package.transfer_paused",
+            Self::PackageTransferResumed { .. } => "application.package.transfer_resumed",
+            Self::PackageTransferCompleted { .. } => "application.package.transfer_completed",
+            Self::PackageVerificationStarted { .. } => "application.package.verification_started",
+            Self::PackageVerified { .. } => "application.package.verified",
+            Self::PackageVerificationFailed { .. } => "application.package.verification_failed",
+            Self::PackageInstallable { .. } => "application.package.installable",
+            Self::PackageTransferFailed { .. } => "application.package.transfer_failed",
             Self::Verified { .. } => "application.verified",
             Self::Installing { .. } => "application.installing",
             Self::Installed { .. } => "application.installed",
@@ -201,6 +307,18 @@ impl ApplicationEvent {
     pub fn application_id(&self) -> &ApplicationId {
         match self {
             Self::Discovered { application_id, .. } => application_id,
+            Self::PackageDiscovered { application_id, .. } => application_id,
+            Self::PackageRequested { application_id, .. } => application_id,
+            Self::PackageTransferStarted { application_id, .. } => application_id,
+            Self::PackageChunkReceived { application_id, .. } => application_id,
+            Self::PackageTransferPaused { application_id, .. } => application_id,
+            Self::PackageTransferResumed { application_id, .. } => application_id,
+            Self::PackageTransferCompleted { application_id, .. } => application_id,
+            Self::PackageVerificationStarted { application_id, .. } => application_id,
+            Self::PackageVerified { application_id, .. } => application_id,
+            Self::PackageVerificationFailed { application_id, .. } => application_id,
+            Self::PackageInstallable { application_id, .. } => application_id,
+            Self::PackageTransferFailed { application_id, .. } => application_id,
             Self::Verified { application_id, .. } => application_id,
             Self::Installing { application_id, .. } => application_id,
             Self::Installed { application_id, .. } => application_id,

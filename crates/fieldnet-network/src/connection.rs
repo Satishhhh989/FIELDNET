@@ -93,6 +93,21 @@ impl ConnectionManager {
             .collect()
     }
 
+    pub async fn disconnect_peer(&self, peer_id: &NodeId) -> bool {
+        let removed = {
+            let mut conns = self.connections.write().await;
+            conns.remove(peer_id)
+        };
+        if removed.is_some() {
+            let _ = self
+                .event_tx
+                .send(ConnectionEvent::PeerDisconnected { peer_id: *peer_id });
+            true
+        } else {
+            false
+        }
+    }
+
     pub async fn send_message(
         &self,
         peer_id: &NodeId,

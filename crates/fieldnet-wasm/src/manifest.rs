@@ -1,3 +1,4 @@
+use fieldnet_content::identity::ContentId;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -138,6 +139,12 @@ impl ApplicationManifest {
     /// Serializes the manifest into a deterministic, canonical JSON byte representation.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, ApplicationError> {
         serde_json::to_vec(self).map_err(Into::into)
+    }
+
+    /// Computes the content hash of the canonical manifest bytes.
+    pub fn compute_manifest_hash(&self) -> ContentId {
+        let bytes = self.canonical_bytes().unwrap_or_default();
+        fieldnet_content::hashing::hash_bytes(&bytes)
     }
 
     /// Deserializes a manifest from a JSON string, running full validation.

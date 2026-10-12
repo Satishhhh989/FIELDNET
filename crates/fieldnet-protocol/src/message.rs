@@ -25,6 +25,7 @@ pub struct Message {
     pub session_id: Option<SessionId>,
 }
 
+//
 impl Message {
     /// Constructs and signs a new DATA message from local sovereign identity.
     #[allow(clippy::too_many_arguments)]
